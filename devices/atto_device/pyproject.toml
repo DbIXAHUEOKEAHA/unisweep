@@ -1,0 +1,4 @@
+[project]
+name = "atto_device"
+version = "1.12.0"
+dependencies = []

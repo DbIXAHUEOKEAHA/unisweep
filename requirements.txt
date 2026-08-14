@@ -1,0 +1,14 @@
+numpy
+scipy
+pandas
+matplotlib
+
+# instrument-specific packages (pyvisa, pymeasure, pyserial, nidaqmx,
+# msl-equipment, libximc, MultiPyVu, ...) are installed on demand by the
+# built-in driver installer; nothing below is needed up front.
+# only needed with real instruments:
+# imageio        # 3D map GIFs
+# pyvisa
+# imageio        # 3D map GIFs
+# pyvisa-py
+# pyserial

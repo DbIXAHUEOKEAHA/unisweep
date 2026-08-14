@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+config/
+resources/
+driver_bundle/
+[0-9][0-9][0-9][0-9][0-9][0-9]/
+data_files/
+2d_maps/
+setget/
+.spyproject/
+.vscode/
+.idea/
+desktop.ini
+Thumbs.db
+.DS_Store
