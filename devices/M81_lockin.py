@@ -2,7 +2,6 @@ from lakeshore import SSMSystem
 from time import sleep
 from math import sqrt
 import pyvisa
-import numpy as np
 
 # Set up GPIB connection to instrument
 rm = pyvisa.ResourceManager()
@@ -13,189 +12,109 @@ class M81_lockin():
         self.M81_connection = rm.open_resource(self.address)
         device = SSMSystem(connection=self.M81_connection)
         
-        self.bcs = device.get_source_module(1)
-        self.vs = device.get_source_module(2)
-        self.vm1 = device.get_measure_module(1)
-        self.vm2 = device.get_measure_module(2)
-        self.cm = device.get_measure_module(3)
+        self.smu_source = device.get_source_module(2)
+        self.smu_measure = device.get_measure_module(2)
         
-        self.set_options = ['LI1_amplitude', 'LI1_frequency',
-                            'LI1_time_constant', 'LI1_low_pass_filter_slope', 'LI1_dc_bias',
-                            'LI3_amplitude', 'LI3_frequency',
-                            'LI3_time_constant', 'LI3_low_pass_filter_slope', 'LI3_dc_bias']
+        self.set_options = ['LI_current_amplitude', 'LI_voltage_amplitude', 'LI_frequency',
+                            'LI_time_constant', 'LI_low_pass_filter_slope', 'LI_dc_current_bias', 'LI_dc_voltage_bias']
         
-        self.get_options = ['LI1_x', 'LI1_y', 'LI1_r', 'LI1_theta',
-                            'LI1_time_constant', 'LI1_low_pass_filter_slope', 
-                            'LI2_x', 'LI2_y', 'LI2_r', 'LI2_theta',
-                            'LI2_time_constant', 'LI2_low_pass_filter_slope', 
-                            'LI3_x', 'LI3_y', 'LI3_r', 'LI3_theta',
-                            'LI3_time_constant', 'LI3_low_pass_filter_slope',
-                            'LI1_amplitude', 'LI1_frequency', 'LI1_phase', 'LI1_dc_bias',
-                            'LI3_amplitude', 'LI3_frequency', 'LI3_phase', 'LI3_dc_bias']
+        self.get_options = ['LI_x', 'LI_y', 'LI_r', 'LI_theta',
+                            'LI_time_constant', 'LI_low_pass_filter_slope', 
+                            'LI_current_amplitude', 'LI_voltage_amplitude', 'LI_frequency', 'LI_phase', 
+                            'LI_dc_current_bias', 'LI_dc_voltage_bias', 'LI_dc_bias_read']
         
-        #self.loggable = ['time_constant', 'frequency', 'phase',
-        #                 'low_pass_filter_slope']
+        self.loggable = ['LI_time_constant', 'LI_low_pass_filter_slope', 'LI_frequency', 'LI_phase']
         
-    def LI1_amplitude(self):
-        ans = self.bcs.get_current_amplitude() / np.sqrt(2)
+    def LI_current_amplitude(self):
+        ans = self.smu_source.get_current_amplitude()
+        return ans
+    
+    def LI_voltage_amplitude(self):
+        ans = self.smu_source.get_voltage_amplitude()
         return ans
 
-    def LI1_frequency(self):
-        ans = self.bcs.get_frequency()
+    def LI_frequency(self):
+        ans = self.smu_source.get_frequency()
         return ans
     
-    def LI1_phase(self):
-        ans = self.bcs.get_sync_phase_shift()
+    def LI_phase(self):
+        ans = self.smu_source.get_sync_phase_shift()
         return ans
     
-    def LI1_dc_bias(self):
-        ans = self.bcs.get_current_offset()
+    def LI_dc_current_bias(self):
+        ans = self.smu_source.get_current_offset()
         return ans
     
-    def LI3_amplitude(self):
-        ans = self.vs.get_voltage_amplitude() / np.sqrt(2)
+    def LI_dc_voltage_bias(self):
+        ans = self.smu_source.get_voltage_offset()
         return ans
 
-    def LI3_frequency(self):
-        ans = self.vs.get_frequency()
+    def LI_time_constant(self):
+        ans = self.smu_measure.get_lock_in_time_constant()
         return ans
     
-    def LI3_phase(self):
-        ans = self.vs.get_sync_phase_shift()
+    def LI_low_pass_filter_slope(self):
+        ans = self.smu_measure.get_lock_in_rolloff()
         return ans
     
-    def LI3_dc_bias(self):
-        ans = self.vs.get_voltage_offset()
+    def LI_x(self):
+        ans = self.smu_measure.get_lock_in_x()
         return ans
     
-    def LI3_time_constant(self):
-        ans = self.cm.get_lock_in_time_constant()
+    def LI_y(self):
+        ans = self.smu_measure.get_lock_in_y()
         return ans
     
-    def LI3_low_pass_filter_slope(self):
-        ans = self.cm.get_lock_in_rolloff()
-        return ans
-
-    def LI1_time_constant(self):
-        ans = self.vm1.get_lock_in_time_constant()
+    def LI_r(self):
+        ans = self.smu_measure.get_lock_in_r()
         return ans
     
-    def LI1_low_pass_filter_slope(self):
-        ans = self.vm1.get_lock_in_rolloff()
+    def LI_theta(self):
+        ans = self.smu_measure.get_lock_in_theta()
         return ans
     
-    def LI1_x(self):
-        ans = self.vm1.get_lock_in_x()
+    def LI_dc_bias_read(self):
+        ans = self.smu_measure.get_lock_in_dc()
         return ans
     
-    def LI1_y(self):
-        ans = self.vm1.get_lock_in_y()
-        return ans
-    
-    def LI1_r(self):
-        ans = self.vm1.get_lock_in_r()
-        return ans
-    
-    def LI1_theta(self):
-        ans = self.vm1.get_lock_in_theta()
-        return ans
-    
-    def LI2_time_constant(self):
-        ans = self.vm2.get_lock_in_time_constant()
-        return ans
-    
-    def LI2_low_pass_filter_slope(self):
-        ans = self.vm2.get_lock_in_rolloff()
-        return ans
-    
-    def LI2_x(self):
-        ans = self.vm2.get_lock_in_x()
-        return ans
-    
-    def LI2_y(self):
-        ans = self.vm2.get_lock_in_y()
-        return ans
-    
-    def LI2_r(self):
-        ans = self.vm2.get_lock_in_r()
-        return ans
-    
-    def LI2_theta(self):
-        ans = self.vm2.get_lock_in_theta()
-        return ans
-    
-    def LI3_time_constant(self):
-        ans = self.cm.get_lock_in_time_constant()
-        return ans
-    
-    def LI3_low_pass_filter_slope(self):
-        ans = self.cm.get_lock_in_rolloff()
-        return ans
-    
-    def LI3_x(self):
-        ans = self.cm.get_lock_in_x()
-        return ans
-    
-    def LI3_y(self):
-        ans = self.cm.get_lock_in_y()
-        return ans
-    
-    def LI3_r(self):
-        ans = self.cm.get_lock_in_r()
-        return ans
-    
-    def LI3_theta(self):
-        ans = self.cm.get_lock_in_theta()
-        return ans
-    
-    def set_LI1_amplitude(self, value, speed = None):
+    def set_LI_current_amplitude(self, value, speed = None):
         #value in amperes
-        self.bcs.set_current_amplitude(value * np.sqrt(2))
+        value *= sqrt(2)
+        self.smu_source.set_current_amplitude(value)
         
-    def set_LI1_frequency(self, value, speed = None):
-        self.bcs.set_frequency(value)
+    def set_LI_voltage_amplitude(self, value, speed = None):
+        #value in volts
+        value *= sqrt(2)
+        self.smu_source.set_voltage_amplitude(value)
         
-    def set_LI1_time_constant(self, value, speed = None):
-        self.vm1.set_lock_in_time_constant(value)
+    def set_LI_frequency(self, value, speed = None):
+        self.smu_source.set_frequency(value)
         
-    def set_LI1_low_pass_filter_slope(self, value, speed = None):
+    def set_LI_time_constant(self, value, speed = None):
+        self.smu_measure.set_lock_in_time_constant(value)
+        
+    def set_LI_low_pass_filter_slope(self, value, speed = None):
         try:
             value = 'R'+int(value)
         except ValueError:
             value = 'R12'
-        self.vm1.set_lock_in_rolloff(value)
+        self.smu_measure.set_lock_in_rolloff(value)
         
-    def set_LI1_dc_bias(self, value, speed = None):
-        self.bcs.set_current_offset(value)
+    def set_LI_dc_voltage_bias(self, value, speed = None):
+        self.smu_source.set_voltage_offset(value)
         
-    def set_LI3_amplitude(self, value, speed = None):
-        #value in amperes
-        self.vs.set_voltage_amplitude(value * np.sqrt(2))
+    def set_LI_dc_current_bias(self, value, speed = None):
+        self.smu_source.set_current_offset(value)
         
-    def set_LI3_frequency(self, value, speed = None):
-        self.vs.set_frequency(value)
-        
-    def set_LI3_time_constant(self, value, speed = None):
-        self.cm.set_lock_in_time_constant(value)
-        
-    def set_LI3_low_pass_filter_slope(self, value, speed = None):
-        try:
-            value = 'R'+int(value)
-        except ValueError:
-            value = 'R12'
-        self.cm.set_lock_in_rolloff(value)
-        
-    def set_LI3_dc_bias(self, value, speed = None):
-        self.vs.set_voltage_offset(value)
 
     def close(self):
         self.M81_connection.close()
         
 def main():
     device = M81_lockin('GPIB0::9::INSTR.LI')
-    f = device.LI1_amplitude()
-    print(f)
-    device.close()
+    loggable = device.loggable
+    for param in loggable:
+        print(f'{param} = {getattr(device, param)()}')
     
 if __name__ == '__main__':
     main()
