@@ -179,8 +179,14 @@ class App:
         assigned = {a: t for a, t in self.registry.types.items()
                     if a != "Time"}
         if setup_done(self.core_dir) or assigned:
+            self.root.after(400, self._start_autoconnect)
             return
         self._wizard = SetupWizard(self)
+
+        def _wizard_closed(event):
+            if event.widget is self._wizard:
+                self.root.after(300, self._start_autoconnect)
+        self._wizard.bind("<Destroy>", _wizard_closed)
 
     def open_setup_wizard(self):
         from .setup_wizard import SetupWizard
@@ -259,6 +265,44 @@ class App:
         TelegramNotifier(st.tg_token, st.tg_chat_id).send_async(
             text, done=lambda ok, d: self.event_queue.put(
                 ("notify_result", d)))
+
+    def _start_autoconnect(self):
+        """Open every assigned, installed instrument in the background —
+        the v1 behaviour: everything ready before the first sweep, no
+        trip to the Devices page. Slow or dead instruments only delay
+        themselves (per-address locking) and report their error on the
+        device row instead of blocking startup."""
+        if not self.settings.connect_on_start:
+            return
+        if getattr(self, "_autoconnect_started", False):
+            return
+        self._autoconnect_started = True
+        targets = [a for a in self.registry.addresses
+                   if self.registry.connected(a) is None
+                   and (a == "Time"
+                        or (self.registry.types.get(a)
+                            and self.registry.is_installed(
+                                self.registry.types[a])
+                            and not self.registry.import_error(
+                                self.registry.types[a])))]
+        if not targets:
+            return
+        self.status(f"Connecting {len(targets)} instrument(s)…")
+
+        def work():
+            ok = fail = 0
+            for addr in targets:
+                try:
+                    self.registry.connect(addr)
+                    ok += 1
+                    self.event_queue.put(("autoconnect", addr, True, ""))
+                except Exception as exc:          # noqa: BLE001
+                    fail += 1
+                    self.event_queue.put(("autoconnect", addr, False,
+                                          f"{type(exc).__name__}: {exc}"))
+            self.event_queue.put(("autoconnect_done", ok, fail))
+        import threading as _th
+        _th.Thread(target=work, daemon=True).start()
 
     def apply_settings(self):
         """Push app-wide settings where they act immediately."""
@@ -341,6 +385,27 @@ class App:
 
     def _handle(self, event):
         if isinstance(event, tuple):              # setget monitor traffic
+            if event[0] == "autoconnect":
+                _tag, addr, ok, msg = event
+                page = self.pages.get("Devices")
+                row = getattr(page, "rows", {}).get(addr) if page else None
+                if row is not None:
+                    if ok:
+                        row.led.set(PALETTE["green"])
+                        row.status.configure(text="connected")
+                    else:
+                        row.led.set(PALETTE["red"])
+                        row.status.configure(text=row._short(f"error: {msg}")
+                                             if hasattr(row, "_short")
+                                             else f"error: {msg}")
+                return
+            if event[0] == "autoconnect_done":
+                _tag, ok, fail = event
+                self.status(f"Instruments connected: {ok}"
+                            + (f", failed: {fail} (see Devices)"
+                               if fail else ""))
+                self.on_devices_changed()
+                return
             if event[0] == "notify_result":
                 self.status(event[1])
                 return

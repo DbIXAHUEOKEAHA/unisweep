@@ -107,6 +107,12 @@ class SettingsPage(ttk.Frame):
         beh.pack(fill="x", padx=10, pady=4)
         body = ttk.Frame(beh, style="Card.TFrame")
         body.grid(row=1, column=0, sticky="ew", pady=(4, 2))
+        self.v_autoconn = tk.BooleanVar(value=st.connect_on_start)
+        ttk.Checkbutton(body, text="Connect all assigned instruments "
+                                   "at start",
+                        variable=self.v_autoconn,
+                        command=self._changed).grid(
+            row=90, column=0, columnspan=3, sticky="w", pady=2)
         self.v_tozero = tk.BooleanVar(value=st.to_zero_default)
         ttk.Checkbutton(body, text="Ramp all axes to zero when a sweep "
                                    "finishes",
@@ -232,6 +238,7 @@ class SettingsPage(ttk.Frame):
         st.map_uniform = self.v_uniform.get()
         st.map_images = self.v_images.get()
         st.to_zero_default = self.v_tozero.get()
+        st.connect_on_start = self.v_autoconn.get()
         st.tg_enabled = self.v_tg.get()
         st.tg_on_error = self.v_tg_err.get()
         st.tg_token = (self.e_token.value() or "").strip()

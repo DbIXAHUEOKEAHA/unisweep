@@ -253,6 +253,7 @@ class DeviceRegistry:
         self.types: dict[str, str] = {}       # address -> class name
         self.addresses: list[str] = ["Time"]
         self._adapters: dict[str, DriverAdapter] = {}
+        self._pending: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
         self._load_types()
         # addresses stored in the mapping (manual IP / cDAQ entries) survive
@@ -351,11 +352,26 @@ class DeviceRegistry:
 
     # ---- connections -----------------------------------------------------
     def connect(self, address: str) -> DriverAdapter:
-        with self._lock:
-            adapter = self._adapters.get(address)
-            if adapter is not None:
-                return adapter
+        """One adapter per address, ever — but the (possibly slow) driver
+        __init__ runs OUTSIDE the registry lock, so opening one sluggish
+        VISA instrument never blocks Test buttons, sweeps, or the startup
+        auto-connect of the others. Concurrent connects to the same
+        address wait on a per-address event and share the one instance.
+        """
+        while True:
+            with self._lock:
+                adapter = self._adapters.get(address)
+                if adapter is not None:
+                    return adapter
+                ev = self._pending.get(address)
+                if ev is None:
+                    ev = threading.Event()
+                    self._pending[address] = ev
+                    break                      # this thread creates it
+            ev.wait(timeout=120)               # another thread is creating
+        try:
             if address == "Time":
+                class_name = "Time"
                 adapter = DriverAdapter("Time", VirtualTime())
             else:
                 class_name = self.types.get(address)
@@ -366,10 +382,27 @@ class DeviceRegistry:
                 cls = self.driver_classes.get(class_name)
                 if cls is None:
                     raise RuntimeError(
-                        f"driver class '{class_name}' not found in resources")
+                        f"driver class '{class_name}' not found in "
+                        f"resources")
                 adapter = DriverAdapter(address, cls(adress=address))
-            self._adapters[address] = adapter
-            return adapter
+        except BaseException:
+            with self._lock:
+                self._pending.pop(address, None)
+            ev.set()
+            raise
+        with self._lock:
+            if self.types.get(address, "Time" if address == "Time"
+                              else None) != class_name:
+                stale = adapter               # reassigned mid-connect
+            else:
+                self._adapters[address] = adapter
+                stale = None
+            self._pending.pop(address, None)
+        ev.set()
+        if stale is not None:
+            stale.close()
+            return self.connect(address)      # build the new type instead
+        return adapter
 
     def connected(self, address: str) -> Optional[DriverAdapter]:
         with self._lock:

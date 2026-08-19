@@ -33,6 +33,8 @@ class AppSettings:
     map_images: bool = True
     # ---- sweep behaviour ---------------------------------------------
     to_zero_default: bool = False
+    connect_on_start: bool = True      # open all assigned instruments
+                                       # in the background at launch
     # ---- sweepable-device protection ---------------------------------
     stall_warn_s: float = 3.0
     stall_abort_s: float = 12.0
