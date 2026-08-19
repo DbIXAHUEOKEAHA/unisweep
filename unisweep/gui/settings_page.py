@@ -24,6 +24,25 @@ class SettingsPage(ttk.Frame):
         self.app = app
         st = app.settings
 
+        # ---------------- appearance ------------------------------------
+        look = Card(self, title="Appearance")
+        look.pack(fill="x", padx=10, pady=(10, 4))
+        lbody = ttk.Frame(look, style="Card.TFrame")
+        lbody.grid(row=1, column=0, sticky="ew", pady=(4, 2))
+        ttk.Label(lbody, text="Theme", style="MutedS.TLabel").grid(
+            row=0, column=0, sticky="w", padx=(0, 8))
+        self.v_theme = tk.StringVar(value=st.theme)
+        for col, (value, text) in enumerate((("dark", "Dark"),
+                                             ("light", "Light"))):
+            ttk.Radiobutton(lbody, text=text, value=value,
+                            variable=self.v_theme,
+                            command=self._theme_changed).grid(
+                row=0, column=1 + col, sticky="w", padx=(0, 14))
+        ttk.Label(lbody, style="MutedS.TLabel",
+                  text="Applies immediately to every window, including "
+                       "open plots.").grid(row=1, column=0, columnspan=3,
+                                           sticky="w", pady=(2, 0))
+
         # ---------------- map / data output ----------------------------
         maps = Card(self, title="Map data output (2-D / 3-D sweeps)")
         maps.pack(fill="x", padx=10, pady=(10, 4))
@@ -110,6 +129,45 @@ class SettingsPage(ttk.Frame):
             e.bind("<FocusOut>", lambda _e: self._changed())
             e.bind("<Return>", lambda _e: self._changed())
 
+        # ---------------- notifications ---------------------------------
+        noti = Card(self, title="Notifications (Telegram)")
+        noti.pack(fill="x", padx=10, pady=4)
+        nbody = ttk.Frame(noti, style="Card.TFrame")
+        nbody.grid(row=1, column=0, sticky="ew", pady=(4, 2))
+        self.v_tg = tk.BooleanVar(value=st.tg_enabled)
+        cb = ttk.Checkbutton(nbody, text="Send a Telegram message when a "
+                                         "sweep ends",
+                             variable=self.v_tg, command=self._changed)
+        cb.grid(row=0, column=0, columnspan=4, sticky="w", pady=2)
+        Tooltip(cb, "Create a bot with @BotFather to get the token; get\n"
+                    "your chat id from @userinfobot (send it any message).\n"
+                    "The token is stored locally in config/settings.json.")
+        ttk.Label(nbody, text="Bot token", style="MutedS.TLabel").grid(
+            row=1, column=0, sticky="w", pady=2)
+        self.e_token = ValidatedEntry(nbody, st.tg_token, validator=str,
+                                      allow_empty=True, width=46)
+        self.e_token.grid(row=1, column=1, columnspan=3, sticky="w", padx=4)
+        ttk.Label(nbody, text="Chat id", style="MutedS.TLabel").grid(
+            row=2, column=0, sticky="w", pady=2)
+        self.e_chat = ValidatedEntry(nbody, st.tg_chat_id, validator=str,
+                                     allow_empty=True, width=18)
+        self.e_chat.grid(row=2, column=1, sticky="w", padx=4)
+        self.v_tg_err = tk.BooleanVar(value=st.tg_on_error)
+        ttk.Checkbutton(nbody, text="also when a sweep stops on an error",
+                        variable=self.v_tg_err,
+                        command=self._changed).grid(row=2, column=2,
+                                                    columnspan=2,
+                                                    sticky="w", padx=(14, 0))
+        ttk.Button(nbody, text="Send test message",
+                   command=self._tg_test).grid(row=3, column=1, sticky="w",
+                                               padx=4, pady=(6, 2))
+        self.tg_status = ttk.Label(nbody, text="", style="MutedS.TLabel")
+        self.tg_status.grid(row=3, column=2, columnspan=2, sticky="w",
+                            padx=8)
+        for e in (self.e_token, self.e_chat):
+            e.bind("<FocusOut>", lambda _e: self._changed())
+            e.bind("<Return>", lambda _e: self._changed())
+
         # ---------------- driver repository ----------------------------
         repo = Card(self, title="Driver repository (GitHub auto-discovery)")
         repo.pack(fill="x", padx=10, pady=4)
@@ -148,6 +206,24 @@ class SettingsPage(ttk.Frame):
         self.repo_status.grid(row=4, column=0, columnspan=4, sticky="w")
 
     # -----------------------------------------------------------------
+    def _tg_test(self):
+        from ..core.notify import TelegramNotifier
+        self._changed()
+        st = self.app.settings
+        notifier = TelegramNotifier(st.tg_token, st.tg_chat_id)
+        if not notifier.configured:
+            self.tg_status.configure(text="enter a token and a chat id "
+                                          "first")
+            return
+        self.tg_status.configure(text="sending…")
+        notifier.send_async(
+            "Unisweep: test message — notifications are working.",
+            done=lambda ok, d: self.app.event_queue.put(
+                ("notify_result", d)))
+
+    def _theme_changed(self):
+        self.app.set_theme(self.v_theme.get())
+
     def _changed(self):
         st = self.app.settings
         st.save_maps = self.v_save.get()
@@ -156,6 +232,10 @@ class SettingsPage(ttk.Frame):
         st.map_uniform = self.v_uniform.get()
         st.map_images = self.v_images.get()
         st.to_zero_default = self.v_tozero.get()
+        st.tg_enabled = self.v_tg.get()
+        st.tg_on_error = self.v_tg_err.get()
+        st.tg_token = (self.e_token.value() or "").strip()
+        st.tg_chat_id = (self.e_chat.value() or "").strip()
         warn = self.e_warn.value()
         abort = self.e_abort.value()
         if warn is not None and warn > 0:

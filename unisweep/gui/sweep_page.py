@@ -115,6 +115,10 @@ class AxisCard(Card):
                                              padx=(10, 0))
         self.back_delay = ValidatedEntry(back.body, "", allow_empty=True)
         self.back_delay.grid(row=0, column=3, padx=4)
+        ttk.Label(back.body, style="MutedS.TLabel",
+                  text="Entering a value here adds the return pass "
+                       "automatically (Walks 1 → 2).").grid(
+            row=1, column=0, columnspan=4, sticky="w", pady=(2, 0))
         ttk.Label(back.body, text="empty = same as forward",
                   style="Muted.TLabel").grid(row=0, column=4, padx=(10, 0))
 
@@ -409,7 +413,7 @@ class SweepPage(ttk.Frame):
         duration = 0.0
         outer_product = 1
         for ax in program.axes:
-            count = max(ax.planned_count(), 1) * max(ax.walks, 1)
+            count = max(ax.planned_count(), 1) * ax.effective_walks()
             points *= count
             outer_product *= count
             duration += outer_product * ax.point_delay()
@@ -419,6 +423,32 @@ class SweepPage(ttk.Frame):
         program = self.build_program()
         if program is None:
             return
+        # ---- v1 'Start warning': axes standing away from their start ----
+        try:
+            from ..core.engine import check_start_positions
+            offenders = check_start_positions(self.app.registry, program)
+        except Exception:                          # noqa: BLE001
+            offenders = []
+        if offenders:
+            lines = [f"{o['device']}.{o['parameter']} is at "
+                     f"{o['current']:.6g} — sweep starts at "
+                     f"{o['start']:.6g} (eps {o['eps']:g})"
+                     for o in offenders]
+            answer = messagebox.askyesnocancel(
+                "Start warning",
+                "\n".join(lines) + "\n\nGo to start?\n\n"
+                "Yes — walk/ramp to the start point first (position shown "
+                "in the status bar)\nNo — start measuring from the current "
+                "value\nCancel — do not start",
+                parent=self.app.root)
+            if answer is None:
+                self.app.status("Sweep cancelled — instruments not at "
+                                "their start values")
+                return
+            if answer is False:
+                import dataclasses
+                program = dataclasses.replace(program,
+                                              approach_start=False)
         self._save_preset(silent=True)
         self.live = self.app.start_sweep(program)
         if self.live is not None:

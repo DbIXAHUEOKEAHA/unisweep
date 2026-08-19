@@ -135,8 +135,9 @@ class opticool():
         self._response = {}
         self._instr = None
         self.instrument_name = ''
+        self.min_speed = 1
         
-        self.device = mpv.Client(host=host, port = port, socket_timeout = timeout)
+        self.device = mpv.Client(host=host, port = port)
         self.device.open()
         self.T_states = self.device.temperature.state_code_dict()
         self._T_approach = self.device.temperature.approach_mode(1)
@@ -272,8 +273,8 @@ class opticool():
             speed = min(float(speed), maxspeed)
             
         #checking minimum speed
-        if speed < 0.5:
-            speed = 0.5
+        if speed < self.min_speed:
+            speed = self.min_speed
         
         #self._T_rate = 1
         self.set_T_rate(speed)

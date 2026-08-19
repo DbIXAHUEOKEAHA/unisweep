@@ -42,7 +42,7 @@ __all__ = ["DriverEntry", "DriverCatalog", "MODULE_TO_PIP", "STDLIB_OK",
 # discovered automatically (GitHub API first, repository zipball as an
 # API-free fallback) and appended to the catalog; with no connection the
 # catalog silently keeps whatever is installed / cached locally.
-DEFAULT_REPO = "DbIXAHUEOKEAHA/unisweep"
+DEFAULT_REPO = "DbIXAHUEOKEAHA/NUS_experiment"
 DEFAULT_BRANCH = "main"
 DEFAULT_REPO_FOLDER = "devices"
 

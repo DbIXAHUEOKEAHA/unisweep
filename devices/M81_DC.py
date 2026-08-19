@@ -13,14 +13,15 @@ class M81_DC():
         device = SSMSystem(connection=self.M81_connection)
         
         self.bcs = device.get_source_module(1)
-        self.vs = device.get_source_module(2)
+        #self.vs = device.get_source_module(2)
         self.vm1 = device.get_measure_module(1)
         self.vm2 = device.get_measure_module(2)
+        self.vm3 = device.get_measure_module(3)
         self.cm = device.get_measure_module(3)
         
         self.set_options = ['DC_VS_voltage', 'DC_BCS_current']
         
-        self.get_options = ['DC_VM1_voltage', 'DC_VM2_voltage', 'DC_CM_current']
+        self.get_options = ['DC_VM1_voltage', 'DC_VM2_voltage', 'DC_VM3_voltage', 'DC_CM_current']
         
         #self.loggable = ['time_constant', 'frequency', 'phase',
         #                 'low_pass_filter_slope']
@@ -31,6 +32,10 @@ class M81_DC():
     
     def DC_VM2_voltage(self):
         ans = self.vm2.get_dc()
+        return ans
+    
+    def DC_VM3_voltage(self):
+        ans = self.vm3.get_dc()
         return ans
     
     def DC_CM_current(self):
@@ -103,8 +108,9 @@ class M81_DC():
         self.M81_connection.close()
         
 def main():
-    device = M81_DC('GPIB0::10::INSTR')
-    device.set_DC_VS_voltage(0.1)
+    device = M81_DC('GPIB0::9::INSTR.DC')
+    Vds = device.DC_VM1_voltage()
+    print(Vds)
     device.close()
     
 if __name__ == '__main__':

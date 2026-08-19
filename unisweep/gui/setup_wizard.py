@@ -71,7 +71,18 @@ class SetupWizard(tk.Toplevel):
         self._build_assign(self.steps[1])
         self._build_install(self.steps[2])
         self._show(0)
-        self.after(200, self._poll)
+        self._poll_id = self.after(200, self._poll)
+        self.bind("<Destroy>", self._cancel_poll, add="+")
+
+    def _cancel_poll(self, event=None):
+        if event is not None and event.widget is not self:
+            return
+        try:
+            if self._poll_id is not None:
+                self.after_cancel(self._poll_id)
+                self._poll_id = None
+        except tk.TclError:
+            pass
 
     # ---------------- step frames -------------------------------------
     def _show(self, index: int):
@@ -271,7 +282,7 @@ class SetupWizard(tk.Toplevel):
         except queue.Empty:
             pass
         if not self._finished:
-            self.after(150, self._poll)
+            self._poll_id = self.after(150, self._poll)
 
     def _skip(self):
         mark_setup_done(self.app.core_dir)

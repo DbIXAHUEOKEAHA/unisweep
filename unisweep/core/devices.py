@@ -118,6 +118,22 @@ class DriverAdapter:
         if callable(fn):
             fn()
 
+    def close(self) -> None:
+        """Release the instrument: call the driver's ``close()`` if the
+        library provides one. Idempotent and exception-proof — a dead
+        device must never block application shutdown or the closing of
+        its siblings."""
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+        fn = getattr(self.raw, "close", None)
+        if callable(fn):
+            try:
+                fn()
+            except Exception as exc:              # noqa: BLE001
+                print(f"[unisweep] {self.address}: close() raised "
+                      f"{type(exc).__name__}: {exc}")
+
     def clear(self) -> None:
         fn = getattr(self.raw, "clear", None)
         if callable(fn):
@@ -263,7 +279,10 @@ class DeviceRegistry:
         if address not in self.addresses:
             self.addresses.append(address)
         with self._lock:
-            self._adapters.pop(address, None)   # force reconnect with new type
+            old = self._adapters.pop(address, None)
+        if old is not None:
+            old.close()          # release the session before the new type
+                                 # opens its own — never two at once
         self.save_types()
 
     def add_address(self, address: str) -> None:
@@ -274,7 +293,9 @@ class DeviceRegistry:
         if address in self.types and address != "Time":
             del self.types[address]
         with self._lock:
-            self._adapters.pop(address, None)
+            old = self._adapters.pop(address, None)
+        if old is not None:
+            old.close()
         self.save_types()
 
     # ---- driver installation support ------------------------------------
@@ -355,10 +376,13 @@ class DeviceRegistry:
             return self._adapters.get(address)
 
     def disconnect_all(self) -> None:
+        """Close every connected instrument (drivers with a ``close()``
+        get it called) and drop the cache. Safe to call twice."""
         with self._lock:
-            for a in self._adapters.values():
-                a.clear()
+            adapters = list(self._adapters.values())
             self._adapters.clear()
+        for a in adapters:
+            a.close()
 
     # ---- catalogue helpers ----------------------------------------------
     def set_options(self, address: str) -> list[str]:

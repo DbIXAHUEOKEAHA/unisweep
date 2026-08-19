@@ -101,7 +101,10 @@ def test_back_and_forth_walks_hit_both_endpoints():
                         reads=())
     evs, _, _ = run_engine(prog, {"M1": dev})
     vals = sweep_values(dev)
-    assert np.allclose(vals, [0.0, 0.5, 1.0, 1.0, 0.5, 0.0])
+    # the turning point is set and measured ONCE — the walk-concatenated
+    # map grid (0, .5, 1, .5, 0) always counted it once, and the old
+    # duplicate row shifted every later cell
+    assert np.allclose(vals, [0.0, 0.5, 1.0, 0.5, 0.0])
 
 
 def test_live_edit_of_stop_mid_sweep():
@@ -990,6 +993,1002 @@ def test_app_settings_roundtrip_and_program_stamp():
                    "stall_abort_s": -1}, fh)
     st3 = AppSettings.load(tmp)
     assert st3.map_style == "grid" and st3.stall_abort_s > st3.stall_warn_s
+
+
+# ---------------- return sweep: full configuration matrix ------------------
+def _speeds(dev, param="Volt"):
+    return [(v, sp) for (p, v, sp, _t) in dev.set_log if p == param]
+
+
+def test_return_sweep_implied_for_setpoint_instrument():
+    """THE reported bug: back_rate entered, walks left at 1 — the return
+    pass silently never ran. Now a return rate implies there-and-back."""
+    dev = MockDevice(sweepable_flags=[True, False], ramp_rate=60.0)
+    prog = SweepProgram(
+        axes=(AxisProgram(device="M1", parameter="Volt", start=0.0, stop=1.0,
+                          rate=30.0, delay=0.02, back_rate=10.0),),  # walks=1!
+        reads=())
+    evs, _, _ = run_engine(prog, {"M1": dev}, timeout=25)
+    cmds = _speeds(dev)
+    assert (1.0, 30.0) in cmds, f"forward ramp at the forward rate: {cmds}"
+    assert (0.0, 10.0) in cmds, f"RETURN ramp at the RETURN rate: {cmds}"
+    rows = [float(e.row[1]) for e in evs if isinstance(e, ev.PointMeasured)]
+    assert abs(max(rows) - 1.0) <= 1e-6 and abs(rows[-1]) <= 1e-6, \
+        f"must go there AND back: {rows[:3]}…{rows[-3:]}"
+    fin = [e for e in evs if isinstance(e, ev.SweepFinished)][0]
+    assert not fin.stopped
+
+
+def test_return_sweep_implied_by_back_delay_only():
+    dev = MockDevice(sweepable_flags=[True, False], ramp_rate=60.0)
+    prog = SweepProgram(
+        axes=(AxisProgram(device="M1", parameter="Volt", start=0.0, stop=1.0,
+                          rate=25.0, delay=0.02, back_delay=0.06),),
+        reads=())
+    evs, _, _ = run_engine(prog, {"M1": dev}, timeout=25)
+    cmds = _speeds(dev)
+    # both passes commanded; return uses the FORWARD rate (no back_rate)
+    assert (1.0, 25.0) in cmds and (0.0, 25.0) in cmds, cmds
+    rows = [float(e.row[1]) for e in evs if isinstance(e, ev.PointMeasured)]
+    assert abs(rows[-1]) <= 1e-6
+
+
+def test_return_sweep_explicit_walks_2_matches_implied():
+    for walks in (1, 2):
+        dev = MockDevice(sweepable_flags=[True, False], ramp_rate=60.0)
+        prog = SweepProgram(
+            axes=(AxisProgram(device="M1", parameter="Volt", start=0.0,
+                              stop=1.0, rate=30.0, delay=0.02,
+                              back_rate=12.0, walks=walks),),
+            reads=())
+        evs, _, _ = run_engine(prog, {"M1": dev}, timeout=25)
+        assert (0.0, 12.0) in _speeds(dev), f"walks={walks}: {_speeds(dev)}"
+
+
+def test_return_sweep_step_mode_setpoint_instrument():
+    """STEP count mode: the rate fields hold steps; the commanded speeds
+    still follow forward/back fields per pass."""
+    dev = MockDevice(sweepable_flags=[True, False], ramp_rate=60.0)
+    prog = SweepProgram(
+        axes=(AxisProgram(device="M1", parameter="Volt", start=0.0, stop=1.0,
+                          rate=0.25, delay=0.02, back_rate=0.5,
+                          count_mode=CountMode.STEP),),
+        reads=())
+    evs, _, _ = run_engine(prog, {"M1": dev}, timeout=25)
+    cmds = _speeds(dev)
+    assert (1.0, 0.25) in cmds and (0.0, 0.5) in cmds, cmds
+    rows = [float(e.row[1]) for e in evs if isinstance(e, ev.PointMeasured)]
+    assert abs(rows[-1]) <= 1e-6
+
+
+def test_return_sweep_force_stepwise_uses_back_rate_and_step():
+    """Force stepwise on a setpoint instrument: every backward SET must
+    carry the RETURN rate as speed and land on the back step grid — the
+    old code sent the forward rate on both passes."""
+    dev = MockDevice(sweepable_flags=[True, False], ramp_rate=60.0)
+    prog = SweepProgram(
+        axes=(AxisProgram(device="M1", parameter="Volt", start=0.0, stop=1.0,
+                          rate=0.25, delay=0.01, back_rate=0.5,
+                          back_delay=0.02, count_mode=CountMode.STEP,
+                          force_stepwise=True),),
+        reads=())
+    evs, _, _ = run_engine(prog, {"M1": dev}, timeout=25)
+    cmds = _speeds(dev)
+    forward = [c for c in cmds[: 5]]
+    backward = [c for c in cmds[5:]]
+    assert [v for v, _ in forward] == [0.0, 0.25, 0.5, 0.75, 1.0], forward
+    assert all(sp == 0.25 for _, sp in forward), forward
+    assert [v for v, _ in backward] == [0.5, 0.0], \
+        f"backward must use the BACK step (0.5): {backward}"
+    assert all(sp == 0.5 for _, sp in backward), \
+        f"backward sets must carry the BACK rate: {backward}"
+
+
+def test_return_sweep_plain_stepwise_instrument():
+    """Non-sweepable device: return pass runs the back step/delay grid."""
+    dev = MockDevice()                       # not sweepable
+    prog = SweepProgram(
+        axes=(AxisProgram(device="M1", parameter="Volt", start=0.0, stop=1.0,
+                          rate=0.25, delay=0.01, back_rate=0.5,
+                          back_delay=0.02, count_mode=CountMode.STEP),),
+        reads=())
+    t0 = time.time()
+    evs, _, _ = run_engine(prog, {"M1": dev}, timeout=25)
+    wall = time.time() - t0
+    vals = [v for (p, v, sp, _t) in dev.set_log if p == "Volt"]
+    assert vals == [0.0, 0.25, 0.5, 0.75, 1.0, 0.5, 0.0], vals
+    assert all(sp is None for (p, v, sp, _t) in dev.set_log), \
+        "plain stepwise devices get no speed argument"
+    assert wall >= 5 * 0.01 + 2 * 0.02 - 0.005
+
+
+def test_return_sweep_different_delays_change_row_density():
+    """Continuous ramp: a longer back_delay means fewer polls on the
+    return pass at the same physical rate."""
+    dev = MockDevice(sweepable_flags=[True, False], ramp_rate=2.0)
+    prog = SweepProgram(
+        axes=(AxisProgram(device="M1", parameter="Volt", start=0.0, stop=1.0,
+                          rate=2.0, delay=0.05, back_delay=0.15),),
+        reads=())
+    evs, _, _ = run_engine(prog, {"M1": dev}, timeout=30)
+    rows = [float(e.row[1]) for e in evs if isinstance(e, ev.PointMeasured)]
+    peak = rows.index(max(rows))
+    n_fwd, n_back = peak + 1, len(rows) - peak - 1
+    assert n_fwd >= 2 * n_back, \
+        f"3x back_delay must thin the return rows: {n_fwd} vs {n_back}"
+
+
+def test_return_sweep_map_grid_includes_return_pass():
+    """2-D map with an implied return on the inner axis: the frozen grid
+    must span BOTH passes and the backward samples must land in it (a
+    walk-count mismatch would silently drop the return data as NaN)."""
+    d1 = MockDevice("M1")
+    d2 = MockDevice("M2", sweepable_flags=[True, False], ramp_rate=60.0)
+    prog = SweepProgram(
+        axes=(AxisProgram(device="M1", parameter="Volt", start=0.0, stop=1.0,
+                          rate=1.0, delay=0.0, count_mode=CountMode.STEP),
+              AxisProgram(device="M2", parameter="Volt", start=0.0, stop=1.0,
+                          rate=0.5, delay=0.02, back_rate=0.5,
+                          count_mode=CountMode.STEP, force_stepwise=True),),
+        reads=("M2.Volt",), save_maps=False)
+    evs, _, _ = run_engine(prog, {"M1": d1, "M2": d2}, timeout=30)
+    rows = [e for e in evs if isinstance(e, ev.MapRowCommitted)]
+    assert rows, "map rows must be committed"
+    grid = rows[0].grid
+    assert grid == (0.0, 0.5, 1.0, 0.5, 0.0), \
+        f"grid must concatenate the implied return pass: {grid}"
+    for r in rows:
+        vals = np.asarray(r.read_rows["M2.Volt"], dtype=float)
+        assert not np.isnan(vals).any(), \
+            f"return-pass cells must hold data, not NaN: {vals}"
+
+
+def test_return_sweep_snake_mode_completes_both_directions():
+    """Snake + return sweep on the inner axis of a 2-D map: every master
+    point still covers both endpoints and the sweep completes."""
+    d1 = MockDevice("M1")
+    d2 = MockDevice("M2", sweepable_flags=[True, False], ramp_rate=60.0)
+    prog = SweepProgram(
+        axes=(AxisProgram(device="M1", parameter="Volt", start=0.0, stop=1.0,
+                          rate=0.5, delay=0.0, count_mode=CountMode.STEP),
+              AxisProgram(device="M2", parameter="Volt", start=0.0, stop=1.0,
+                          rate=30.0, delay=0.02, back_rate=15.0,
+                          snake=True),),
+        reads=(), save_maps=False)
+    evs, _, _ = run_engine(prog, {"M1": d1, "M2": d2}, timeout=40)
+    fin = [e for e in evs if isinstance(e, ev.SweepFinished)][0]
+    assert not fin.stopped
+    per_master: dict = {}
+    for e in evs:
+        if isinstance(e, ev.PointMeasured):
+            per_master.setdefault(float(e.axis_values[0]),
+                                  []).append(float(e.axis_values[1]))
+    assert len(per_master) == 3
+    for master, inner in per_master.items():
+        assert abs(max(inner) - 1.0) <= 1e-6 and abs(min(inner)) <= 1e-6, \
+            f"master {master}: inner axis must span both ends: " \
+            f"{min(inner)}..{max(inner)}"
+
+
+# ---------------- approach-to-start for stepwise axes ----------------------
+def test_stepwise_approach_from_parked_position():
+    """Device parked at 0.7, stepwise sweep 0->1 in 0.25 steps: the engine
+    must WALK it to the start (0.45, 0.2) before the sweep sets 0.0 — not
+    jump. Exactly one set lands on the entry point; no rows during it."""
+    dev = MockDevice()
+    dev._values["Volt"] = 0.7
+    prog = SweepProgram(
+        axes=(AxisProgram(device="M1", parameter="Volt", start=0.0, stop=1.0,
+                          rate=0.25, delay=0.01, count_mode=CountMode.STEP),),
+        reads=())
+    evs, _, _ = run_engine(prog, {"M1": dev}, timeout=25)
+    vals = [round(v, 6) for (p, v, sp, _t) in dev.set_log if p == "Volt"]
+    assert vals[:2] == [0.45, 0.2], f"approach steps missing: {vals}"
+    assert vals[2:] == [0.0, 0.25, 0.5, 0.75, 1.0], vals
+    rows = [float(e.row[1]) for e in evs if isinstance(e, ev.PointMeasured)]
+    assert rows[0] == 0.0 and len(rows) == 5, \
+        f"no rows during the approach: {rows}"
+
+
+def test_stepwise_approach_outer_axis_2d():
+    """2-D map, OUTER stepwise device parked at 3.0, outer sweep 0..2 step
+    1: outer must approach (2.0, 1.0) before its first point, and the inner
+    scan must not start until the outer entry point is set."""
+    outer = MockDevice("M1")
+    outer._values["Volt"] = 3.0
+    inner = MockDevice("M2")
+    prog = SweepProgram(
+        axes=(AxisProgram(device="M1", parameter="Volt", start=0.0, stop=2.0,
+                          rate=1.0, delay=0.01, count_mode=CountMode.STEP),
+              AxisProgram(device="M2", parameter="Curr", start=0.0, stop=0.2,
+                          rate=0.1, delay=0.005, count_mode=CountMode.STEP)),
+        reads=(), save_maps=False)
+    evs, _, _ = run_engine(prog, {"M1": outer, "M2": inner}, timeout=25)
+    log = sorted(outer.set_log + inner.set_log, key=lambda e: e[3])
+    outer_vals = [round(v, 6) for (p, v, sp, t) in log if p == "Volt"]
+    assert outer_vals == [2.0, 1.0, 0.0, 1.0, 2.0], outer_vals
+    t_first_inner = min(t for (p, v, sp, t) in log if p == "Curr")
+    t_outer_entry = [t for (p, v, sp, t) in log if p == "Volt"][2]
+    assert t_first_inner > t_outer_entry, \
+        "inner scan started before the outer axis reached its start"
+
+
+def test_stepwise_approach_skipped_when_already_at_start():
+    dev = MockDevice()                       # parked at 0.0 == start
+    prog = SweepProgram(
+        axes=(AxisProgram(device="M1", parameter="Volt", start=0.0, stop=0.5,
+                          rate=0.25, delay=0.01, count_mode=CountMode.STEP),),
+        reads=())
+    run_engine(prog, {"M1": dev}, timeout=25)
+    vals = [round(v, 6) for (p, v, sp, _t) in dev.set_log if p == "Volt"]
+    assert vals == [0.0, 0.25, 0.5], f"no approach sets expected: {vals}"
+
+
+def test_stepwise_approach_within_one_step_is_direct():
+    dev = MockDevice()
+    dev._values["Volt"] = 0.2                # one step away from 0.0
+    prog = SweepProgram(
+        axes=(AxisProgram(device="M1", parameter="Volt", start=0.0, stop=0.5,
+                          rate=0.25, delay=0.01, count_mode=CountMode.STEP),),
+        reads=())
+    run_engine(prog, {"M1": dev}, timeout=25)
+    vals = [round(v, 6) for (p, v, sp, _t) in dev.set_log if p == "Volt"]
+    assert vals == [0.0, 0.25, 0.5], vals
+
+
+def test_stepwise_approach_forced_sweepable_carries_speed():
+    dev = MockDevice(sweepable_flags=[True, False], ramp_rate=60.0)
+    dev._values["Volt"] = 0.9
+    prog = SweepProgram(
+        axes=(AxisProgram(device="M1", parameter="Volt", start=0.0, stop=0.5,
+                          rate=0.25, delay=0.01, count_mode=CountMode.STEP,
+                          force_stepwise=True),),
+        reads=())
+    run_engine(prog, {"M1": dev}, timeout=25)
+    cmds = [(round(v, 6), sp) for (p, v, sp, _t) in dev.set_log
+            if p == "Volt"]
+    assert cmds[:3] == [(0.65, 0.25), (0.4, 0.25), (0.15, 0.25)], \
+        f"forced-sweepable approach must step AND carry the rate: {cmds}"
+
+
+def test_stepwise_approach_unreadable_parameter_sets_directly():
+    """A write-only parameter (not in get_options): position unknown ->
+    the engine must not crash and must fall back to a direct set."""
+    class WriteOnly:
+        def __init__(self, adress=None):
+            self.adress = adress
+            self.set_options = ["Bias"]
+            self.get_options = []
+            self.log = []
+        def set_Bias(self, value=None, speed=None):
+            self.log.append(value)
+    dev = WriteOnly("W1")
+    prog = SweepProgram(
+        axes=(AxisProgram(device="W1", parameter="Bias", start=0.0, stop=0.4,
+                          rate=0.2, delay=0.005, count_mode=CountMode.STEP),),
+        reads=())
+    evs, _, _ = run_engine(prog, {"W1": dev}, timeout=25)
+    assert dev.log == [0.0, 0.2, 0.4], dev.log
+    fin = [e for e in evs if isinstance(e, ev.SweepFinished)][0]
+    assert not fin.stopped
+
+
+def test_stepwise_approach_respects_stop():
+    dev = MockDevice()
+    dev._values["Volt"] = 5.0                # long approach: 19 steps
+    prog = SweepProgram(
+        axes=(AxisProgram(device="M1", parameter="Volt", start=0.0, stop=1.0,
+                          rate=0.25, delay=0.05, count_mode=CountMode.STEP),),
+        reads=())
+
+    def hook(live, engine, q):
+        time.sleep(0.2)
+        engine.stop()
+
+    evs, _, _ = run_engine(prog, {"M1": dev}, live_hook=hook, timeout=25)
+    fin = [e for e in evs if isinstance(e, ev.SweepFinished)][0]
+    assert fin.stopped, "stop during the approach must end the sweep"
+    assert not [e for e in evs if isinstance(e, ev.PointMeasured)]
+    vals = [v for (p, v, sp, _t) in dev.set_log if p == "Volt"]
+    assert 0 < len(vals) < 19, f"approach must have been interrupted: {vals}"
+
+
+# ------------- snake mode: the no-teleport contract, thoroughly -----------
+def _per_master(evs):
+    """{master_value: [inner readings in order]} preserving event order."""
+    out: dict = {}
+    order = []
+    for e in evs:
+        if isinstance(e, ev.PointMeasured):
+            m = round(float(e.axis_values[0]), 9)
+            if m not in out:
+                out[m] = []
+                order.append(m)
+            out[m].append(round(float(e.axis_values[1]), 9))
+    return [(m, out[m]) for m in order]
+
+
+def _assert_no_teleport(evs, max_jump, label):
+    """Snake's physical contract: the inner axis NEVER jumps more than one
+    step — not within a row, not across row boundaries. This is the
+    invariant that catches any direction-state desync (the overnight bug
+    class) regardless of which configuration triggers it."""
+    inner = [float(e.axis_values[1]) for e in evs
+             if isinstance(e, ev.PointMeasured)]
+    for a, b in zip(inner, inner[1:]):
+        assert abs(b - a) <= max_jump + 1e-9, \
+            f"{label}: inner axis teleported {a} -> {b}"
+
+
+def _snake_prog(inner_axis, masters=5):
+    return SweepProgram(
+        axes=(AxisProgram(device="M1", parameter="Volt", start=0.0,
+                          stop=float(masters - 1), rate=1.0, delay=0.0,
+                          count_mode=CountMode.STEP),
+              inner_axis),
+        reads=("M2.Volt",), save_maps=False)
+
+
+def test_snake_stepwise_five_masters_alternate_and_never_jump():
+    inner = AxisProgram(device="M2", parameter="Volt", start=0.0, stop=1.0,
+                        rate=0.25, delay=0.005, count_mode=CountMode.STEP,
+                        snake=True)
+    evs, _, _ = run_engine(_snake_prog(inner), {"M1": MockDevice("M1"),
+                                                "M2": MockDevice("M2")},
+                           timeout=40)
+    seq = _per_master(evs)
+    assert len(seq) == 5
+    for i, (m, vals) in enumerate(seq):
+        expect = list(np.linspace(0, 1, 5))
+        if i % 2 == 1:
+            expect = expect[::-1]
+        assert vals == [round(v, 9) for v in expect], \
+            f"master {m} (row {i + 1}): {vals}"
+    _assert_no_teleport(evs, 0.25, "stepwise snake")
+
+
+def test_snake_continuous_five_masters_alternate_and_never_jump():
+    inner = AxisProgram(device="M2", parameter="Volt", start=0.0, stop=1.0,
+                        rate=8.0, delay=0.02, snake=True)
+    evs, _, _ = run_engine(
+        _snake_prog(inner),
+        {"M1": MockDevice("M1"),
+         "M2": MockDevice("M2", sweepable_flags=[True, False],
+                          ramp_rate=8.0)}, timeout=60)
+    seq = _per_master(evs)
+    assert len(seq) == 5
+    for i, (m, vals) in enumerate(seq):
+        assert len(vals) >= 3, f"row {i + 1} nearly empty: {vals}"
+        span = max(vals) - min(vals)
+        assert span >= 0.9, f"row {i + 1} FROZEN (the reported bug " \
+                            f"shape): span {span}, vals {vals[:4]}…"
+        going_up = vals[-1] > vals[0]
+        assert going_up == (i % 2 == 0), \
+            f"row {i + 1} direction wrong: {vals[0]} -> {vals[-1]}"
+    _assert_no_teleport(evs, 8.0 * 0.02 * 3, "continuous snake")
+
+
+def test_snake_with_even_walks_keeps_contract():
+    """walks=2 + snake: each master goes there-and-back, so every master
+    re-enters FORWARD from the left — still no jumps anywhere. The old
+    per-call toggle degenerated exactly here."""
+    inner = AxisProgram(device="M2", parameter="Volt", start=0.0, stop=1.0,
+                        rate=0.25, delay=0.005, count_mode=CountMode.STEP,
+                        snake=True, walks=2)
+    evs, _, _ = run_engine(_snake_prog(inner, masters=4),
+                           {"M1": MockDevice("M1"), "M2": MockDevice("M2")},
+                           timeout=40)
+    seq = _per_master(evs)
+    assert len(seq) == 4
+    up = list(np.linspace(0, 1, 5))
+    both = [round(v, 9) for v in up + up[::-1][1:]]
+    for i, (m, vals) in enumerate(seq):
+        assert vals == both, f"master row {i + 1}: {vals}"
+    _assert_no_teleport(evs, 0.25, "snake walks=2")
+
+
+def test_snake_with_return_sweep_implied_walks():
+    """snake + back_rate (implies 2 walks): the overnight configuration
+    class. Contract holds; every row covers both endpoints."""
+    inner = AxisProgram(device="M2", parameter="Volt", start=0.0, stop=1.0,
+                        rate=8.0, delay=0.02, back_rate=8.0, snake=True)
+    evs, _, _ = run_engine(
+        _snake_prog(inner, masters=4),
+        {"M1": MockDevice("M1"),
+         "M2": MockDevice("M2", sweepable_flags=[True, False],
+                          ramp_rate=8.0)}, timeout=60)
+    seq = _per_master(evs)
+    assert len(seq) == 4
+    for i, (m, vals) in enumerate(seq):
+        assert max(vals) >= 0.999 and min(vals) <= 1e-6, \
+            f"row {i + 1} missed an endpoint: {min(vals)}..{max(vals)}"
+        assert max(vals) - min(vals) >= 0.9, f"row {i + 1} frozen"
+    _assert_no_teleport(evs, 8.0 * 0.02 * 3, "snake+return")
+
+
+def test_snake_with_three_walks_alternates_entry():
+    inner = AxisProgram(device="M2", parameter="Volt", start=0.0, stop=1.0,
+                        rate=0.5, delay=0.005, count_mode=CountMode.STEP,
+                        snake=True, walks=3)
+    evs, _, _ = run_engine(_snake_prog(inner, masters=3),
+                           {"M1": MockDevice("M1"), "M2": MockDevice("M2")},
+                           timeout=40)
+    seq = _per_master(evs)
+    up = [0.0, 0.5, 1.0]
+    m1 = up + [0.5, 0.0] + [0.5, 1.0]          # F,B,F  ends right
+    # master 2 enters BACKWARD; its entry point is measured because it is
+    # a fresh row (new master coordinate) — only same-row continuation
+    # walks skip the turn point
+    m2 = [1.0, 0.5, 0.0, 0.5, 1.0, 0.5, 0.0]
+    assert seq[0][1] == m1, seq[0]
+    assert seq[1][1] == m2, seq[1]
+    _assert_no_teleport(evs, 0.5, "snake walks=3")
+
+
+def test_snake_survives_inner_fault_and_recovers_direction():
+    """Field-symptom shape: the inner instrument stalls during master 3's
+    walk. The walk aborts with a crucial warning — and the FOLLOWING rows
+    must still obey the snake contract from wherever the device stands
+    (no teleport, correct continuation), instead of desyncing."""
+    eng_cls, old = _short_budgets()
+    eng_cls.STALL_WARN_S, eng_cls.STALL_ABORT_S = 0.3, 0.9
+    try:
+        inner_dev = MockDevice("M2", sweepable_flags=[True, False],
+                               ramp_rate=6.0)
+        # stall_at only bites walks moving up past 0.4; row 3 enters
+        # forward after row 2 ended left -> it freezes at 0.4
+        calls = {"n": 0}
+        orig_set = inner_dev._set
+        def set_hook(p, value, speed):
+            if p == "Volt":
+                calls["n"] += 1
+                inner_dev.stall_at = 0.4 if calls["n"] == 3 else None
+            return orig_set(p, value, speed)
+        inner_dev._set = set_hook
+        inner = AxisProgram(device="M2", parameter="Volt", start=0.0,
+                            stop=1.0, rate=6.0, delay=0.03, snake=True)
+        evs, _, _ = run_engine(
+            _snake_prog(inner, masters=5),
+            {"M1": MockDevice("M1"), "M2": inner_dev}, timeout=60)
+    finally:
+        eng_cls.STALL_WARN_S, eng_cls.STALL_ABORT_S = old
+    errors = [e for e in evs if isinstance(e, ev.SweepError)]
+    assert any(e.crucial and "M2.Volt" in e.message for e in errors), \
+        "the stall must be reported naming the instrument"
+    seq = _per_master(evs)
+    assert len(seq) == 5, f"all masters must still run: {len(seq)}"
+    # the warn-time retry clears the transient stall: every row completes
+    for i, (m, vals) in enumerate(seq):
+        assert max(vals) - min(vals) >= 0.9, \
+            f"row {i + 1} did not recover: {vals[:4]}"
+    _assert_no_teleport(evs, 6.0 * 0.03 * 3 + 0.4, "snake with fault")
+
+
+def test_snake_3d_middle_axis():
+    devs = {n: MockDevice(n) for n in ("M1", "M2", "M3")}
+    prog = SweepProgram(
+        axes=(AxisProgram(device="M1", parameter="Volt", start=0, stop=1,
+                          rate=1.0, delay=0.0, count_mode=CountMode.STEP),
+              AxisProgram(device="M2", parameter="Volt", start=0, stop=1,
+                          rate=0.5, delay=0.0, count_mode=CountMode.STEP,
+                          snake=True),
+              AxisProgram(device="M3", parameter="Curr", start=0, stop=0.2,
+                          rate=0.1, delay=0.002, count_mode=CountMode.STEP)),
+        reads=("M3.Curr",), save_maps=False)
+    evs, _, _ = run_engine(prog, devs, timeout=60)
+    middle = [round(v, 9) for (p, v, sp, t) in devs["M2"].set_log
+              if p == "Volt"]
+    assert middle == [0.0, 0.5, 1.0, 1.0, 0.5, 0.0], \
+        f"middle snake must reverse for the second master plane: {middle}"
+
+
+def test_snake_map_rows_align_by_value():
+    """Committed map rows for alternating snake directions must place the
+    values at the right grid cells: reading the inner axis itself, every
+    cell must equal its own grid value regardless of direction."""
+    d1 = MockDevice("M1")
+    d2 = MockDevice("M2")
+    inner = AxisProgram(device="M2", parameter="Volt", start=0.0, stop=1.0,
+                        rate=0.25, delay=0.002, count_mode=CountMode.STEP,
+                        snake=True)
+    prog = SweepProgram(
+        axes=(AxisProgram(device="M1", parameter="Volt", start=0.0, stop=3.0,
+                          rate=1.0, delay=0.0, count_mode=CountMode.STEP),
+              inner),
+        reads=("M2.Volt",), save_maps=False)
+    evs, _, _ = run_engine(prog, {"M1": d1, "M2": d2}, timeout=40)
+    rows = [e for e in evs if isinstance(e, ev.MapRowCommitted)]
+    assert len(rows) == 4
+    for r in rows:
+        vals = np.asarray(r.read_rows["M2.Volt"], dtype=float)
+        grid = np.asarray(r.grid, dtype=float)
+        assert np.allclose(vals, grid, atol=1e-9), \
+            f"row {r.row_value}: cells misplaced: grid {grid} vals {vals}"
+
+
+# ----- the overnight field symptom: flat row, then business as usual ------
+def test_field_symptom_deaf_row_recovers_next_row():
+    """Reproduces the reported night-scan pattern: the inner instrument
+    silently ignores its ramp command for ONE row (row 3). The engine
+    records the honest flat readback, warns then aborts that walk naming
+    the device, the next row's approach repositions silently, and rows
+    after that are normal — a single glitch costs one row, not the night."""
+    eng_cls, old = _short_budgets()
+    eng_cls.STALL_WARN_S, eng_cls.STALL_ABORT_S = 0.25, 0.7
+    try:
+        # in a healthy snake chain approaches are in-band no-ops, so set
+        # call #3 on Volt is exactly row 3's sweep command — deaf there
+        inner_dev = MockDevice("M2", sweepable_flags=[True, False],
+                               ramp_rate=6.0,
+                               fault={"param": "Volt", "kind": "deaf",
+                                      "start": 3, "end": 4})
+        inner = AxisProgram(device="M2", parameter="Volt", start=0.0,
+                            stop=1.0, rate=6.0, delay=0.04, snake=True)
+        evs, _, _ = run_engine(
+            _snake_prog(inner, masters=5),
+            {"M1": MockDevice("M1"), "M2": inner_dev}, timeout=60)
+    finally:
+        eng_cls.STALL_WARN_S, eng_cls.STALL_ABORT_S = old
+    seq = _per_master(evs)
+    assert len(seq) == 5
+    spans = [max(v) - min(v) for _m, v in seq]
+    # the WARN-TIME RETRY re-sends the lost command: the row that used to
+    # stay flat for its whole duration (the overnight field map bug) now
+    # COMPLETES — a lost command costs seconds, not the row
+    assert all(sp >= 0.9 for sp in spans), \
+        f"every row must complete thanks to the retry: spans {spans}"
+    errors = [e for e in evs if isinstance(e, ev.SweepError)]
+    assert any(e.crucial and "M2.Volt" in e.message
+               and "re-sending" in e.message for e in errors), \
+        "the retry must be logged naming the instrument"
+    fin = [e for e in evs if isinstance(e, ev.SweepFinished)][0]
+    assert not fin.stopped
+
+
+def test_wedged_instrument_escalates_to_clean_stop():
+    """Instrument stays deaf: after the SECOND consecutive aborted walk
+    the sweep stops fatally naming the device — instead of burning hours
+    writing a flat row per master (which is what a whole night of the
+    reported symptom would have been)."""
+    eng_cls, old = _short_budgets()
+    eng_cls.STALL_WARN_S, eng_cls.STALL_ABORT_S = 0.25, 0.7
+    try:
+        inner_dev = MockDevice("M2", sweepable_flags=[True, False],
+                               ramp_rate=6.0,
+                               fault={"param": "Volt", "kind": "deaf",
+                                      "start": 3})       # deaf forever
+        inner = AxisProgram(device="M2", parameter="Volt", start=0.0,
+                            stop=1.0, rate=6.0, delay=0.04, snake=True)
+        t0 = time.time()
+        evs, _, _ = run_engine(
+            _snake_prog(inner, masters=30),
+            {"M1": MockDevice("M1"), "M2": inner_dev}, timeout=60)
+        wall = time.time() - t0
+    finally:
+        eng_cls.STALL_WARN_S, eng_cls.STALL_ABORT_S = old
+    errors = [e for e in evs if isinstance(e, ev.SweepError)]
+    fatals = [e for e in errors if e.fatal]
+    assert fatals and fatals[0].crucial \
+        and "two consecutive walks aborted" in fatals[0].message \
+        and "M2.Volt" in fatals[0].message, [e.message for e in errors]
+    seq = _per_master(evs)
+    assert len(seq) <= 4, f"must stop early, not run 30 masters: {len(seq)}"
+    assert wall < 15, f"must stop within ~2 stall budgets, took {wall:.0f} s"
+
+
+# -------- the overnight field-map incident: full forensic coverage --------
+def test_frozen_readback_aborts_and_map_shows_hole_not_smear():
+    """The failure mode in the uploaded night file: readback pins at the
+    entry endpoint. The retry can't help (command is fine, readback lies),
+    the watchdog aborts — and the committed map row must show mostly NaN
+    with the few real samples localised, NOT a fabricated full flat line
+    (which is exactly what hid the fault in the night data)."""
+    eng_cls, old = _short_budgets()
+    eng_cls.STALL_WARN_S, eng_cls.STALL_ABORT_S = 0.25, 0.8
+    try:
+        inner_dev = MockDevice("M2", sweepable_flags=[True, False],
+                               ramp_rate=6.0)
+        # freeze the readback exactly for row 2 (its sweep command is the
+        # 2nd Volt set in a healthy snake chain), unfreeze afterwards
+        orig_set = inner_dev._set
+        cnt = {"n": 0}
+        def hook(pp, value, speed):
+            r = orig_set(pp, value, speed)
+            if pp == "Volt":
+                cnt["n"] += 1
+                if cnt["n"] == 2:
+                    inner_dev.fault = {"param": "Volt",
+                                       "kind": "freeze_read",
+                                       "start": inner_dev.read_calls
+                                       .get("Volt", 0) + 1}
+                elif cnt["n"] == 4:
+                    # NOT on 3: the warn-time retry is set #3 and must not
+                    # magically unfreeze a lying readback
+                    inner_dev.fault = None
+                    inner_dev._frozen.clear()
+            return r
+        inner_dev._set = hook
+        # a finer grid (0.12 steps, ~9 cells) so the 1.5-step locality
+        # radius is visibly local rather than half the row
+        inner = AxisProgram(device="M2", parameter="Volt", start=0.0,
+                            stop=1.0, rate=6.0, delay=0.02, snake=True)
+        prog = SweepProgram(
+            axes=(AxisProgram(device="M1", parameter="Volt", start=0.0,
+                              stop=3.0, rate=1.0, delay=0.0,
+                              count_mode=CountMode.STEP),
+                  inner),
+            reads=("M2.Volt",), save_maps=False)
+        evs, _, _ = run_engine(prog, {"M1": MockDevice("M1"),
+                                      "M2": inner_dev}, timeout=60)
+    finally:
+        eng_cls.STALL_WARN_S, eng_cls.STALL_ABORT_S = old
+    rows = [e for e in evs if isinstance(e, ev.MapRowCommitted)]
+    assert len(rows) == 4
+    healthy = [r for r in rows
+               if np.isfinite(list(r.read_rows.values())[0]).sum()
+               > 0.8 * len(r.grid)]
+    broken = [r for r in rows if r not in healthy]
+    assert broken, "the frozen-readback row must exist"
+    for r in broken:
+        vals = np.asarray(r.read_rows["M2.Volt"], dtype=float)
+        finite = np.isfinite(vals)
+        assert finite.sum() <= 0.35 * len(vals), \
+            f"aborted row must be MOSTLY NaN (was 100% smeared before): " \
+            f"{finite.sum()}/{len(vals)} filled"
+        assert finite.any(), "the honestly measured cells must remain"
+    errors = [e for e in evs if isinstance(e, ev.SweepError)]
+    assert any("aborted" in e.message and "M2.Volt" in e.message
+               for e in errors)
+
+
+def test_watchdog_noise_immune_stuck_readback():
+    """Gauss-level jitter on a STUCK field must not keep resetting the
+    stall timer (the old progress test compared against eps*0.01 — any
+    downward noise fluctuation defeated it and let a stuck row run to
+    full length)."""
+    eng_cls, old = _short_budgets()
+    eng_cls.STALL_WARN_S, eng_cls.STALL_ABORT_S = 0.3, 0.9
+    try:
+        dev = MockDevice("M1", sweepable_flags=[True, False], ramp_rate=4.0,
+                         stall_at=0.5, noise=0.004)
+        prog = SweepProgram(
+            axes=(AxisProgram(device="M1", parameter="Volt", start=0.0,
+                              stop=1.0, rate=4.0, delay=0.03),),
+            reads=())
+        t0 = time.time()
+        evs, _, _ = run_engine(prog, {"M1": dev}, timeout=30)
+        wall = time.time() - t0
+    finally:
+        eng_cls.STALL_WARN_S, eng_cls.STALL_ABORT_S = old
+    errors = [e for e in evs if isinstance(e, ev.SweepError)]
+    assert any("aborted" in e.message for e in errors), \
+        [e.message for e in errors]
+    assert wall < 10, f"noisy-stuck must abort within budgets: {wall:.1f} s"
+
+
+def test_watchdog_no_false_abort_on_noisy_healthy_ramp():
+    dev = MockDevice("M1", sweepable_flags=[True, False], ramp_rate=1.5,
+                     noise=0.004)
+    prog = SweepProgram(
+        axes=(AxisProgram(device="M1", parameter="Volt", start=0.0, stop=1.0,
+                          rate=1.5, delay=0.04, walks=2),),
+        reads=())
+    evs, _, _ = run_engine(prog, {"M1": dev}, timeout=30)
+    errors = [e for e in evs if isinstance(e, ev.SweepError)]
+    assert not any("aborted" in e.message for e in errors), \
+        [e.message for e in errors]
+    fin = [e for e in evs if isinstance(e, ev.SweepFinished)][0]
+    assert not fin.stopped
+
+
+def test_night_file_scenario_replay():
+    """Direct replay of the uploaded map's failure: snake field axis, a
+    lost command on some backward rows. With the retry the map comes out
+    complete — every committed row tracks the grid."""
+    eng_cls, old = _short_budgets()
+    eng_cls.STALL_WARN_S, eng_cls.STALL_ABORT_S = 0.25, 0.9
+    try:
+        field = MockDevice("B", sweepable_flags=[True, False],
+                           ramp_rate=8.0, noise=0.002,
+                           fault={"param": "Volt", "kind": "deaf",
+                                  "start": 2, "end": 3})   # a backward cmd
+        inner = AxisProgram(device="B", parameter="Volt", start=-1.0,
+                            stop=1.0, rate=8.0, delay=0.03, snake=True)
+        prog = SweepProgram(
+            axes=(AxisProgram(device="T", parameter="Volt", start=0.0,
+                              stop=4.0, rate=1.0, delay=0.0,
+                              count_mode=CountMode.STEP),
+                  inner),
+            reads=("B.Volt",), save_maps=False)
+        evs, _, _ = run_engine(prog, {"T": MockDevice("T"), "B": field},
+                               timeout=60)
+    finally:
+        eng_cls.STALL_WARN_S, eng_cls.STALL_ABORT_S = old
+    rows = [e for e in evs if isinstance(e, ev.MapRowCommitted)]
+    assert len(rows) == 5
+    for r in rows:
+        vals = np.asarray(r.read_rows["B.Volt"], dtype=float)
+        grid = np.asarray(r.grid, dtype=float)
+        ok = np.isfinite(vals)
+        assert ok.sum() > 0.8 * len(grid), \
+            f"row {r.row_value} incomplete: {ok.sum()}/{len(grid)}"
+        # nearest-by-value can be off by up to half a grid step (0.12)
+        assert np.allclose(vals[ok], grid[ok], atol=0.15), \
+            f"row {r.row_value} does not track the grid"
+    fin = [e for e in evs if isinstance(e, ev.SweepFinished)][0]
+    assert not fin.stopped
+
+
+# --------- the night replay: full-realism snake soak on OptiCoolMock ------
+from tests.mock_driver import OptiCoolMock  # noqa: E402
+
+
+def _night_prog(masters, span=600.0, step=11.0, delay=0.01):
+    """Scaled night program: T_finger outer (stepwise counts, sweepable
+    device), Field inner snake; eps/step, latency/warn, noise/eps ratios
+    match the real cryostat."""
+    return SweepProgram(
+        axes=(AxisProgram(device="OC", parameter="T_finger", start=3.0,
+                          stop=3.0 + (masters - 1) * 1.0, rate=1.0,
+                          delay=0.0, count_mode=CountMode.STEP),
+              AxisProgram(device="OC", parameter="Field", start=-span,
+                          stop=span, rate=step / delay, delay=delay,
+                          snake=True)),
+        reads=("OC.Field", "OC.T_finger"), save_maps=False)
+
+
+def _run_night(masters, seed="OC::1", warn=0.06, abort=0.24, timeout=240):
+    eng_cls, old = _short_budgets()
+    eng_cls.STALL_WARN_S, eng_cls.STALL_ABORT_S = warn, abort
+    try:
+        dev = OptiCoolMock(seed)
+        dev.maxspeed[0] = 400.0            # scaled fast T so the soak runs
+        evs, _, _ = run_engine(_night_prog(masters), {"OC": dev},
+                               timeout=timeout)
+    finally:
+        eng_cls.STALL_WARN_S, eng_cls.STALL_ABORT_S = old
+    return evs, dev
+
+
+def _row_report(evs, span=600.0):
+    seq = _per_master(evs)
+    flats, bad_dir = [], []
+    for i, (m, vals) in enumerate(seq):
+        rng = max(vals) - min(vals)
+        if rng < 1.9 * span:
+            flats.append((i + 1, round(rng, 1), round(vals[0], 1)))
+        going_up = vals[-1] > vals[0]
+        if going_up != (i % 2 == 0):
+            bad_dir.append(i + 1)
+    return seq, flats, bad_dir
+
+
+def test_night_replay_soak_no_flat_rows():
+    """THE overnight configuration, three different noise seeds: every
+    row must span the full field range, alternate direction, and produce
+    zero crucial/stall errors. Any flat row here = the reported bug."""
+    for seed in ("OC::A", "OC::B", "OC::C"):
+        evs, dev = _run_night(masters=12, seed=seed)
+        seq, flats, bad_dir = _row_report(evs)
+        errors = [e.message for e in evs if isinstance(e, ev.SweepError)]
+        assert len(seq) == 12, f"[{seed}] masters: {len(seq)}"
+        assert not flats, f"[{seed}] FLAT ROWS (the night bug!): {flats}"
+        assert not bad_dir, f"[{seed}] direction broke at rows {bad_dir}"
+        assert not errors, f"[{seed}] unexpected errors: {errors}"
+        fin = [e for e in evs if isinstance(e, ev.SweepFinished)][0]
+        assert not fin.stopped
+
+
+def test_night_replay_long_soak_43_masters():
+    """The full 43-row night, scaled. Zero tolerance for flat rows."""
+    evs, dev = _run_night(masters=43, timeout=400)
+    seq, flats, bad_dir = _row_report(evs)
+    assert len(seq) == 43, len(seq)
+    assert not flats, f"FLAT ROWS: {flats}"
+    assert not bad_dir, f"direction: {bad_dir}"
+    turn_cmds = [(v, sp) for (p, v, sp, t) in dev.set_log if p == "Field"]
+    # 43 sweep commands + 1 initial approach (field starts mid-range)
+    assert len(turn_cmds) == 44, \
+        f"one command per row plus the first approach: {len(turn_cmds)}"
+    assert all(sp == 11.0 / 0.01 for _v, sp in turn_cmds), turn_cmds[:3]
+
+
+def test_night_replay_latency_beyond_warn_retry_saves_row():
+    """Command-to-motion latency LONGER than the stall warn budget: the
+    warn fires, the retry re-sends (restarting the mock's latency), and
+    the row must still complete without an abort."""
+    eng_cls, old = _short_budgets()
+    eng_cls.STALL_WARN_S, eng_cls.STALL_ABORT_S = 0.06, 0.5
+    try:
+        dev = OptiCoolMock("OC::L")
+        dev.maxspeed[0] = 400.0
+        dev.LATENCY = 0.10                  # > warn budget
+        evs, _, _ = run_engine(_night_prog(6), {"OC": dev}, timeout=240)
+    finally:
+        eng_cls.STALL_WARN_S, eng_cls.STALL_ABORT_S = old
+    seq, flats, _ = _row_report(evs)
+    assert len(seq) == 6 and not flats, flats
+    errors = [e.message for e in evs if isinstance(e, ev.SweepError)]
+    assert not any("aborted" in m for m in errors), errors
+
+
+def test_night_replay_big_overshoot_across_turnarounds():
+    """Overshoot comparable to eps at every arrival, settling back during
+    the master step: turnarounds must stay clean."""
+    dev = OptiCoolMock("OC::O")
+    dev.maxspeed[0] = 400.0
+    dev.OVERSHOOT = 6.0                     # > eps (5)
+    eng_cls, old = _short_budgets()
+    eng_cls.STALL_WARN_S, eng_cls.STALL_ABORT_S = 0.06, 0.24
+    try:
+        evs, _, _ = run_engine(_night_prog(8), {"OC": dev}, timeout=240)
+    finally:
+        eng_cls.STALL_WARN_S, eng_cls.STALL_ABORT_S = old
+    seq, flats, bad_dir = _row_report(evs)
+    assert len(seq) == 8 and not flats and not bad_dir, (flats, bad_dir)
+
+
+# ------- commit-boundary integrity + full-stack (renderer ON) replay ------
+def test_map_commit_boundary_never_slides():
+    """Every committed row must be built EXCLUSIVELY from its own
+    master's samples. The read tags each sample with master*10000+inner,
+    so a single stolen or leaked sample across a row boundary changes the
+    tag and fails loudly. (The overnight worksheet's flat rows were the
+    next scan's first 1-2 samples flushed under the previous boundary —
+    a mixed-module state this test would catch in any build.)"""
+    class Tagger(MockDevice):
+        def __init__(self, adress=None):
+            super().__init__(adress, sweepable_flags=[False, False])
+        def Curr(self):
+            return self._values["Volt"] * 1.0   # inner echo
+
+    outer = MockDevice("M1")
+    inner = MockDevice("M2", sweepable_flags=[True, False], ramp_rate=40.0)
+
+    class Tag:
+        def __init__(self, adress=None):
+            self.adress = adress
+            self.set_options = []
+            self.get_options = ["tag"]
+        def tag(self):
+            return outer._values["Volt"] * 10000 + inner._values["Volt"]
+
+    prog = SweepProgram(
+        axes=(AxisProgram(device="M1", parameter="Volt", start=0.0, stop=5.0,
+                          rate=1.0, delay=0.0, count_mode=CountMode.STEP),
+              AxisProgram(device="M2", parameter="Volt", start=0.0, stop=1.0,
+                          rate=40.0, delay=0.01, snake=True)),
+        reads=("TAG.tag",), save_maps=False)
+    evs, _, _ = run_engine(prog, {"M1": outer, "M2": inner,
+                                  "TAG": Tag("TAG")}, timeout=60)
+    rows = [e for e in evs if isinstance(e, ev.MapRowCommitted)]
+    assert len(rows) == 6
+    for r in rows:
+        vals = np.asarray(r.read_rows["TAG.tag"], dtype=float)
+        fin = vals[np.isfinite(vals)]
+        masters = np.unique(np.round(fin // 10000))
+        assert list(masters) == [round(r.row_value)], \
+            f"row {r.row_value}: contains samples from masters " \
+            f"{masters} — COMMIT BOUNDARY SLID"
+
+
+def test_night_replay_full_stack_files_and_renderer():
+    """The one combination the soak lacked: write_files=True with the
+    background PNG renderer running — the night's real configuration.
+    The TABLE FILE on disk is read back and every line must span the
+    full field range (a flat line on disk = the reported bug)."""
+    eng_cls, old = _short_budgets()
+    eng_cls.STALL_WARN_S, eng_cls.STALL_ABORT_S = 0.06, 0.24
+    try:
+        dev = OptiCoolMock("OC::F")
+        dev.maxspeed[0] = 400.0
+        prog = SweepProgram(
+            axes=(AxisProgram(device="OC", parameter="T_finger", start=3.0,
+                              stop=10.0, rate=1.0, delay=0.0,
+                              count_mode=CountMode.STEP),
+                  AxisProgram(device="OC", parameter="Field", start=-600.0,
+                              stop=600.0, rate=1100.0, delay=0.01,
+                              snake=True)),
+            reads=("OC.Field",), save_maps=True, map_images=True,
+            map_style="both")
+        evs, _, tmp = run_engine(prog, {"OC": dev}, timeout=300)
+    finally:
+        eng_cls.STALL_WARN_S, eng_cls.STALL_ABORT_S = old
+    tables = _find_map_tables(tmp)
+    assert tables, "the worksheet must exist on disk"
+    lines = open(tables[0]).read().splitlines()
+    grid = np.array([float(x) for x in lines[0].split(",")[1:]])
+    assert len(lines) - 1 == 8, f"8 map lines expected: {len(lines) - 1}"
+    for li, ln in enumerate(lines[1:], 1):
+        vals = np.array([float(x) if x != "nan" else np.nan
+                         for x in ln.split(",")[1:]])
+        fin = vals[np.isfinite(vals)]
+        span = fin.max() - fin.min()
+        assert span > 0.9 * (grid.max() - grid.min()), \
+            f"DISK line {li} is flat (span {span:.0f}) — the night bug"
+        distinct = len(np.unique(np.round(fin, 1)))
+        assert distinct > 50, f"line {li}: only {distinct} distinct values"
+    fin_ev = [e for e in evs if isinstance(e, ev.SweepFinished)][0]
+    assert not fin_ev.stopped
+    xyz = _find_xyz(tmp)
+    assert xyz, "style='both' must also produce the xyz file"
+
+
+# --------------- v1 'Start warning': pre-flight + No-branch ---------------
+def test_check_start_positions_detects_offsets():
+    from unisweep.core.engine import check_start_positions
+
+    class Reg:
+        def __init__(self, devs): self.devs = devs
+        def connect(self, a): return self.devs[a]
+    from unisweep.core.devices import DriverAdapter
+    parked = MockDevice("P"); parked._values["Volt"] = 0.7
+    parked.eps = [0.05, 1e-6]
+    at_start = MockDevice("A")                       # Volt = 0.0
+    within = MockDevice("W"); within._values["Volt"] = 0.03
+    within.eps = [0.05, 1e-6]
+    reg = Reg({d.adress: DriverAdapter(d.adress, d)
+               for d in (parked, at_start, within)})
+    prog = SweepProgram(
+        axes=(AxisProgram(device="P", parameter="Volt", start=0.0, stop=1.0,
+                          rate=0.1, delay=0.01, count_mode=CountMode.STEP),
+              AxisProgram(device="A", parameter="Volt", start=0.0, stop=1.0,
+                          rate=0.1, delay=0.01, count_mode=CountMode.STEP)),
+        reads=())
+    out = check_start_positions(reg, prog)
+    assert len(out) == 1 and out[0]["device"] == "P" \
+        and abs(out[0]["current"] - 0.7) < 1e-9 \
+        and out[0]["eps"] == 0.05, out
+    # within eps -> clean; write-only parameter -> skipped silently
+    prog2 = SweepProgram(
+        axes=(AxisProgram(device="W", parameter="Volt", start=0.0, stop=1.0,
+                          rate=0.1, delay=0.01, count_mode=CountMode.STEP),),
+        reads=())
+    assert check_start_positions(reg, prog2) == []
+
+    class WriteOnly:
+        def __init__(self, adress=None):
+            self.adress = adress
+            self.set_options = ["Bias"]; self.get_options = []
+        def set_Bias(self, value=None, speed=None): pass
+    reg2 = Reg({"WO": DriverAdapter("WO", WriteOnly("WO"))})
+    prog3 = SweepProgram(
+        axes=(AxisProgram(device="WO", parameter="Bias", start=0.0,
+                          stop=1.0, rate=0.5, delay=0.01,
+                          count_mode=CountMode.STEP),),
+        reads=())
+    assert check_start_positions(reg2, prog3) == []
+
+
+def test_approach_start_false_starts_from_current():
+    """The dialog's 'No': stepwise device parked at 0.7 gets NO gradual
+    approach — the first grid point is set directly (v1's jump); a
+    sweepable one ramps straight for the stop from where it stands,
+    recording from the current value."""
+    dev = MockDevice()
+    dev._values["Volt"] = 0.7
+    prog = SweepProgram(
+        axes=(AxisProgram(device="M1", parameter="Volt", start=0.0, stop=1.0,
+                          rate=0.25, delay=0.01, count_mode=CountMode.STEP),),
+        reads=(), approach_start=False)
+    run_engine(prog, {"M1": dev}, timeout=25)
+    vals = [round(v, 6) for (p, v, sp, _t) in dev.set_log if p == "Volt"]
+    assert vals == [0.0, 0.25, 0.5, 0.75, 1.0], \
+        f"no approach steps expected before the grid: {vals}"
+
+    swp = MockDevice(sweepable_flags=[True, False], ramp_rate=30.0)
+    swp._values["Volt"] = 0.7
+    prog2 = SweepProgram(
+        axes=(AxisProgram(device="M1", parameter="Volt", start=0.0, stop=1.0,
+                          rate=20.0, delay=0.02),),
+        reads=(), approach_start=False)
+    evs, _, _ = run_engine(prog2, {"M1": swp}, timeout=25)
+    cmds = [(v, sp) for (p, v, sp, _t) in swp.set_log if p == "Volt"]
+    assert cmds[0] == (1.0, 20.0), \
+        f"first command must be the sweep target, no approach: {cmds}"
+    rows = [float(e.row[1]) for e in evs if isinstance(e, ev.PointMeasured)]
+    assert abs(rows[0] - 0.7) < 0.05, \
+        f"recording must begin at the current value: {rows[:3]}"
 
 
 if __name__ == "__main__":

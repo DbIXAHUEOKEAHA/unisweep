@@ -66,6 +66,21 @@ class AxisProgram:
             else self.back_delay
         return max(float(d), 0.0)
 
+    def effective_walks(self) -> int:
+        """Walk count the sweep actually runs.
+
+        A return rate/delay only exists on a backward pass, so entering
+        one **implies** there-and-back: with the walk counter still at 1
+        the legacy 'return sweep' silently never happened. Everything —
+        engine loop, map grid, ETA — takes the count from here so the
+        implication stays consistent.
+        """
+        w = max(int(self.walks), 1)
+        if w < 2 and (self.back_rate is not None
+                      or self.back_delay is not None):
+            return 2
+        return w
+
     def planned_count(self) -> int:
         """Best-estimate number of points in one forward walk (for ETA)."""
         if self.manual_points is not None:
@@ -85,6 +100,10 @@ class SweepProgram:
     script: str = ""                     # per-point user script
     filename: str = ""                   # '' -> auto naming
     to_zero_on_finish: bool = False
+    approach_start: bool = True          # walk axes to their start point
+                                         # (False = start from wherever
+                                         # the instrument stands — the
+                                         # v1 'Start warning' No-branch)
     save_maps: bool = True               # write 2d_maps output (2D/3D)
     map_style: str = "grid"              # 'grid' worksheet | 'xyz' | 'both'
     map_interpolated: bool = True        # map samples onto the grid by value

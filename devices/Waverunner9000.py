@@ -9,7 +9,7 @@ from scipy.stats import binned_statistic
 #Inspired by https://github.com/SengerM/TeledyneLeCroyPy
 
 class Waverunner9000():
-    def __init__(self, adress = '169.254.28.243'):
+    def __init__(self, adress = '192.168.0.102'):
         if adress.startswith('TCPIP0'):
             self.adress = adress
         else:
@@ -64,13 +64,10 @@ class Waverunner9000():
                             '200MS': 200e-3,'500MS': 500e-3,'1S': 1,'2S': 2,'5S': 5,'10S': 10,'20S': 20,
                             '50S': 50,'100S': 100}
         
-<<<<<<< HEAD
         self.sparcing = 200
         self._npoints = 100000
-=======
         self.sparcing = 1
         self._npoints = 5000000
->>>>>>> 555c29c9bdf7e38315a660134f1ee159cc0af24a
         self.first_point = 0
         self.segment_number = 0
         self.set_config()
@@ -398,19 +395,8 @@ class Waverunner9000():
 def main():
     device = Waverunner9000()
     
-<<<<<<< HEAD
-    device.read_auto_correlator(iterat = 10)
-=======
-    import pandas as pd
-    import os
-    
-    folder = r'C:\Users\graphene\Desktop\Dima\Lab\Unisweep\Data\250123\data_files'
-    filename = 'data7'
-    
-    filename = os.path.join(folder, f'{filename}.csv')
-    
-    t = device.Time1()
-    a = device.Amplitude1()
+    t = device.Time4()
+    a = device.Amplitude4()
     
     t = t.split(',')
     t = [float(i) for i in t]
@@ -420,12 +406,6 @@ def main():
     
     plt.plot(t, a)
     plt.show()
->>>>>>> 555c29c9bdf7e38315a660134f1ee159cc0af24a
-    
-    d = {'Time': t, 'Ampl': a}
-    df = pd.DataFrame(d)
-    df.to_csv(filename, index = False)
-    device.close()
 
 if __name__ == '__main__':
     main()

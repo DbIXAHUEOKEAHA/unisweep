@@ -23,6 +23,8 @@ __all__ = ["AppSettings"]
 
 @dataclasses.dataclass
 class AppSettings:
+    # ---- appearance ---------------------------------------------------
+    theme: str = "dark"                # 'dark' | 'light'
     # ---- map / data output -------------------------------------------
     save_maps: bool = True
     map_style: str = "grid"            # 'grid' | 'xyz' | 'both'
@@ -34,6 +36,11 @@ class AppSettings:
     # ---- sweepable-device protection ---------------------------------
     stall_warn_s: float = 3.0
     stall_abort_s: float = 12.0
+    # ---- notifications ------------------------------------------------
+    tg_enabled: bool = False
+    tg_token: str = ""
+    tg_chat_id: str = ""
+    tg_on_error: bool = True
 
     # -----------------------------------------------------------------
     @classmethod
@@ -52,6 +59,8 @@ class AppSettings:
             return cls()
         if out.map_style not in ("grid", "xyz", "both"):
             out.map_style = "grid"
+        if out.theme not in ("dark", "light"):
+            out.theme = "dark"
         out.stall_warn_s = max(float(out.stall_warn_s), 0.5)
         out.stall_abort_s = max(float(out.stall_abort_s),
                                 out.stall_warn_s + 0.5)

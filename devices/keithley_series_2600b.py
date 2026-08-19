@@ -185,8 +185,9 @@ class keithley_series_2600b():
         self.k26.ChB.source_voltage = value
         
 def main():
-    device = keithley_series_2600b()
-    #device.set_A_source_current(-0.00001998)
+    device = keithley_series_2600b('GPIB0::26::INSTR')
+    v = device.B_source_voltage()
+    print(v)
     
 if __name__ == '__main__':
     main()

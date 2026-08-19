@@ -130,6 +130,12 @@ class DeviceRow:
     # local driver source, resolves imports, and verifies them afterwards.)
 
     def _assigned(self, _=None):
+        engine = getattr(self.page.app, "engine", None)
+        if engine is not None and engine.is_alive():
+            # reassigning would close the instrument under the sweep
+            self.status.configure(text="stop the sweep before reassigning")
+            self.refresh()                     # revert the combobox
+            return
         label = self.combo.get()
         if label == UNASSIGNED:
             self.page.registry.unassign(self.address)
@@ -255,7 +261,18 @@ class DevicesPage(ttk.Frame):
         self._log_box = log_box
 
         self.rebuild_rows()
-        self.after(200, self._poll)
+        self._poll_id = self.after(200, self._poll)
+        self.bind("<Destroy>", self._cancel_poll, add="+")
+
+    def _cancel_poll(self, event=None):
+        if event is not None and event.widget is not self:
+            return
+        try:
+            if self._poll_id is not None:
+                self.after_cancel(self._poll_id)
+                self._poll_id = None
+        except tk.TclError:
+            pass
 
     # ---------------- catalog labels ----------------------------------
     def driver_labels(self) -> list[str]:
@@ -362,7 +379,12 @@ class DevicesPage(ttk.Frame):
                     self.app.on_devices_changed()
         except queue.Empty:
             pass
-        self.after(200, self._poll)
+        except tk.TclError:
+            return                     # page torn down mid-poll
+        try:
+            self._poll_id = self.after(200, self._poll)
+        except tk.TclError:
+            pass
 
 
 class SweepTestDialog(tk.Toplevel):
@@ -451,7 +473,18 @@ class SweepTestDialog(tk.Toplevel):
                    command=self.destroy).pack(side="right", padx=4)
         self._q: "queue.Queue" = queue.Queue()
         self._prefill()
-        self.after(100, self._poll)
+        self._poll_id = self.after(100, self._poll)
+        self.bind("<Destroy>", self._cancel_poll, add="+")
+
+    def _cancel_poll(self, event=None):
+        if event is not None and event.widget is not self:
+            return
+        try:
+            if self._poll_id is not None:
+                self.after_cancel(self._poll_id)
+                self._poll_id = None
+        except tk.TclError:
+            pass
 
     def _prefill(self, _=None):
         opt = self._opt_by_mark.get(self.param.get(), "")
@@ -485,7 +518,7 @@ class SweepTestDialog(tk.Toplevel):
         except queue.Empty:
             pass
         if self.winfo_exists():
-            self.after(100, self._poll)
+            self._poll_id = self.after(100, self._poll)
 
     def _run(self):
         if self._running:

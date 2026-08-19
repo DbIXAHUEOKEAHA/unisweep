@@ -43,12 +43,12 @@ sampleTemp = ct.c_float(-1.0)
 
 lib.AttoDRY_Interface_begin.argtypes = (ct.c_ushort, )
 #send 1 for attoDRY2100, 2 for attoDRY800.
-err1 = lib.AttoDRY_Interface_begin(ct.c_ushort(1))
+err1 = lib.AttoDRY_Interface_begin(ct.c_ushort(2))
 print("err1", err1)
 
 lib.AttoDRY_Interface_Connect.argtypes = (ct.c_char_p, )
 #adjust COM port
-err2 = lib.AttoDRY_Interface_Connect(ct.c_char_p(b"COM4"))  
+err2 = lib.AttoDRY_Interface_Connect(ct.c_char_p(b"COM7"))  
 print("err2", err2)
 
 #try to connect to cryostat:
@@ -65,6 +65,17 @@ lib.AttoDRY_Interface_getUserTemperature.argtypes = (ct.POINTER(ct.c_float), )
 err4 = lib.AttoDRY_Interface_getUserTemperature(ct.byref(userTemp))
 print("err4", err4, "userTemp", userTemp.value)
 
+time.sleep(2)
+
+err5 = lib.AttoDRY_Interface_setUserTemperature(ct.c_float(109.))
+print("err5", err5, "Set UserTemp to 109K")
+
+time.sleep(2)
+
+err5 = lib.AttoDRY_Interface_getUserTemperature(ct.byref(userTemp))
+print("err5", err5, "userTemp", userTemp.value)
+
+
 #read the sample T 6 times
 for i in range(6):
     err6 = lib.AttoDRY_Interface_getSampleTemperature(ct.byref(sampleTemp))
@@ -74,4 +85,4 @@ for i in range(6):
 #disconnect the cryostat to free the COM Port:
 lib.AttoDRY_Interface_Disconnect()
 
-#lib.AttoDRY_Interface_end()
+lib.AttoDRY_Interface_end()

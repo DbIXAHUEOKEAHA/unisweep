@@ -7,7 +7,7 @@ import glob
 import serial
 
 class _8MTF_75LS05():
-    def __init__(self, adress = 'COM9'):
+    def __init__(self, adress = 'COM5'):
         print(f'XStage adress is {adress}')
         num = [str(int(x)) for x in adress if x.isdigit()]
         ind = ''
@@ -421,9 +421,9 @@ class _8MTF_75LS05():
         lib.close_device(byref(cast(self.device_id, POINTER(c_int))))
 
 def main():
-    adress = 'COM4'
+    adress = 'COM3'
     stage = _8MTF_75LS05(adress)  
-    stage.set_position(25.7955284118652, 10)
+    #stage.set_position(-20, 10)
 
     try:
         print(f'Current position is {stage.position()}')

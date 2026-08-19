@@ -12,9 +12,9 @@ Tk main loop (``after``) — no other thread ever touches a widget.
 
 from __future__ import annotations
 
+import os
 import queue
 import tkinter as tk
-from tkinter import messagebox
 from tkinter import messagebox, ttk
 
 from ..core import events as ev
@@ -23,6 +23,7 @@ from ..core.catalog import DriverCatalog
 from ..core.devices import DeviceRegistry
 from ..core.engine import SweepEngine
 from ..core.livedata import LiveData, LiveMaps
+from ..core.notify import TelegramNotifier, compose_sweep_message
 from ..core.settings import AppSettings
 from .devices_page import DevicesPage
 from .plot_panel import PlotManager
@@ -30,6 +31,8 @@ from .setget_page import SetGetPage
 from .settings_page import SettingsPage
 from .sweep_page import SweepPage
 from .theme import PALETTE, apply_theme
+from .. import gui as _gui  # noqa: F401
+from . import theme as _theme
 from .widgets import Led
 
 PUMP_MS = 100
@@ -42,12 +45,13 @@ class App:
         self.root = tk.Tk()
         self.root.title("Unisweep")
         self.root.minsize(1100, 700)
+        self.settings = AppSettings.load(core_dir)
+        _theme.init_theme(self.settings.theme)
         apply_theme(self.root)
         self._maximize()
 
         self.registry = DeviceRegistry(core_dir)
         self.catalog = DriverCatalog(core_dir)
-        self.settings = AppSettings.load(core_dir)
         self.apply_settings()
         self.event_queue: "queue.Queue" = queue.Queue()
         self.live_data = LiveData()
@@ -148,7 +152,7 @@ class App:
         self.message_label.pack(side="left", padx=8)
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.root.after(PUMP_MS, self._pump)
+        self._pump_id = self.root.after(PUMP_MS, self._pump)
         self._wizard = None
         self.root.after(300, self._maybe_run_setup)
         self.root.after(1200, lambda: self.refresh_catalog_async())
@@ -225,6 +229,37 @@ class App:
             except tk.TclError:
                 pass
 
+    def set_theme(self, name: str) -> None:
+        """Live dark/light switch: restyle every widget in every window,
+        re-color the plot figures, persist the choice."""
+        if name not in ("dark", "light"):
+            return
+        if name == self.settings.theme:
+            return
+        _theme.set_theme(self.root, name)
+        self.plots.retheme()
+        self.setget_plots.retheme()
+        self.pages["Devices"].refresh_rows()   # LED colors re-read PALETTE
+        self.settings.theme = name
+        self.settings.save(self.core_dir)
+
+    def _notify_sweep_end(self, event) -> None:
+        st = self.settings
+        if not st.tg_enabled:
+            return
+        stopped = bool(getattr(event, "stopped", False))
+        if stopped and not st.tg_on_error and self._run_fatal:
+            return
+        text = compose_sweep_message(
+            stopped=stopped,
+            elapsed_s=getattr(self, "_run_elapsed", 0.0),
+            points=getattr(self, "_run_points", 0),
+            filename=getattr(self, "_run_file", ""),
+            detail=getattr(self, "_run_fatal", ""))
+        TelegramNotifier(st.tg_token, st.tg_chat_id).send_async(
+            text, done=lambda ok, d: self.event_queue.put(
+                ("notify_result", d)))
+
     def apply_settings(self):
         """Push app-wide settings where they act immediately."""
         from ..core.engine import SweepEngine
@@ -249,6 +284,8 @@ class App:
 
     # ---------------- sweep lifecycle ----------------------------------
     def start_sweep(self, program: SweepProgram) -> LiveProgram | None:
+        if program is None:
+            return None
         if self.engine is not None and self.engine.is_alive():
             messagebox.showwarning("Sweep", "A sweep is already running.")
             return None
@@ -283,14 +320,30 @@ class App:
     def _pump(self):
         try:
             while True:
-                event = self.event_queue.get_nowait()
-                self._handle(event)
-        except queue.Empty:
-            pass
-        self.root.after(PUMP_MS, self._pump)
+                try:
+                    event = self.event_queue.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    self._handle(event)
+                except tk.TclError:
+                    raise                 # teardown — handled below
+                except Exception as exc:  # noqa: BLE001
+                    # a single broken handler must NEVER kill the pump:
+                    # without this, every later event (rows, finish,
+                    # errors, notifications) would be silently lost
+                    print(f"[unisweep] event handler failed for "
+                          f"{type(event).__name__}: "
+                          f"{type(exc).__name__}: {exc}")
+            self._pump_id = self.root.after(PUMP_MS, self._pump)
+        except tk.TclError:
+            pass          # window torn down mid-pump — quiet exit
 
     def _handle(self, event):
         if isinstance(event, tuple):              # setget monitor traffic
+            if event[0] == "notify_result":
+                self.status(event[1])
+                return
             if event[0] == "setget_row":
                 self.pages["Set & Get"].show_row(event[1], event[2])
                 self.setget_data.add_row(tuple(event[1]),
@@ -313,12 +366,17 @@ class App:
             return
         if isinstance(event, ev.SweepStarted):
             self._popup_seen = set()
+            self._run_points = 0
+            self._run_elapsed = 0.0
+            self._run_file = ""
+            self._run_fatal = ""
             self.live_data.reset(event.columns, event.dimensions)
             self.live_maps.reset(event.columns[1 + event.dimensions:])
             self.plots.set_columns(event.columns, event.dimensions)
             self._reset_readings(event.columns)
             self.progress.configure(value=0)
         elif isinstance(event, ev.FileOpened):
+            self._run_file = os.path.basename(event.path)
             self.live_data.new_file(event.path)
             self.file_label.configure(text=event.path)
         elif isinstance(event, ev.PointMeasured):
@@ -334,6 +392,10 @@ class App:
             self.live_maps.on_row(event)
             self.plots.mark_dirty()
         elif isinstance(event, ev.Progress):
+            self._run_points = event.done
+            self._run_elapsed = getattr(event, "elapsed_seconds",
+                                        self._run_elapsed) or \
+                self._run_elapsed
             frac = event.done / event.total if event.total else 0.0
             self.progress.configure(value=min(frac, 1.0))
             if event.eta_seconds is not None:
@@ -355,6 +417,7 @@ class App:
             self.status(f"{event.where}: {event.message}")
             if event.fatal:
                 self.led.set(PALETTE["red"])
+                self._run_fatal = event.message
             if event.fatal or getattr(event, "crucial", False):
                 # a device the sweep depends on failed — raise a warning
                 # window naming the instrument (once per unique message)
@@ -369,6 +432,7 @@ class App:
                     self.root.after(0, lambda t=title, m=event.message,
                                     fn=show: fn(t, m, parent=self.root))
         elif isinstance(event, ev.SweepFinished):
+            self._notify_sweep_end(event)
             self.led.set(PALETTE["muted"] if not event.stopped
                          else PALETTE["red"])
             self.state_label.configure(
@@ -388,6 +452,16 @@ class App:
         monitor = self.pages["Set & Get"].monitor
         if monitor is not None:
             monitor.stop_ev.set()
+            if hasattr(monitor, "join"):
+                monitor.join(2)          # let the last read finish first
+        try:
+            if self._pump_id is not None:
+                self.root.after_cancel(self._pump_id)
+        except tk.TclError:
+            pass
+        self.plots.shutdown()
+        self.setget_plots.shutdown()
+        # every instrument whose library has close() gets it called
         self.registry.disconnect_all()
         self.root.destroy()
 

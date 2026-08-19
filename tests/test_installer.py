@@ -361,6 +361,107 @@ def test_verify_and_learn_records_working_recipe(monkey_installs=True):
     sys.modules.pop("strange_module_qqq", None)
 
 
+# ------------- connection lifecycle: single init + clean close -------------
+def _life_core():
+    import tests.mock_driver as md
+    tmp = make_core(tempfile.mkdtemp())
+    with open(os.path.join(tmp, "resources", "LifeDev.py"), "w") as fh:
+        fh.write("from tests.mock_driver import MockDevice\n"
+                 "class LifeDev(MockDevice):\n    pass\n")
+    md.MockDevice.init_log.clear()
+    md.MockDevice.close_log.clear()
+    registry = DeviceRegistry(tmp)
+    registry.assign("GPIB0::5::INSTR", "LifeDev")
+    registry.assign("GPIB0::6::INSTR", "LifeDev")
+    return registry, md.MockDevice
+
+
+def test_connect_caches_single_instance_per_address():
+    registry, Mock = _life_core()
+    a1 = registry.connect("GPIB0::5::INSTR")
+    a2 = registry.connect("GPIB0::5::INSTR")
+    registry.connect("GPIB0::6::INSTR")
+    assert a1 is a2, "same address must reuse the same adapter"
+    # option queries and catalogue refreshes never re-instantiate
+    registry.set_options("GPIB0::5::INSTR")
+    registry.get_options("GPIB0::5::INSTR")
+    registry.read_catalogue()
+    registry.read_catalogue()
+    assert Mock.init_log.count("GPIB0::5::INSTR") == 1, Mock.init_log
+    assert Mock.init_log.count("GPIB0::6::INSTR") == 1, Mock.init_log
+
+
+def test_option_queries_do_not_touch_hardware():
+    """Unconnected devices: options come from source parsing, not from an
+    instantiation — switching pages/dimensions must not open sessions."""
+    registry, Mock = _life_core()
+    for _ in range(5):                       # a switching storm
+        registry.set_options("GPIB0::5::INSTR")
+        registry.get_options("GPIB0::6::INSTR")
+        registry.read_catalogue()
+    assert Mock.init_log == [], f"hardware touched: {Mock.init_log}"
+
+
+def test_disconnect_all_closes_every_instrument_once():
+    registry, Mock = _life_core()
+    registry.connect("GPIB0::5::INSTR")
+    registry.connect("GPIB0::6::INSTR")
+    registry.disconnect_all()
+    assert sorted(Mock.close_log) == ["GPIB0::5::INSTR", "GPIB0::6::INSTR"]
+    registry.disconnect_all()                # idempotent
+    assert len(Mock.close_log) == 2, "close must be sent exactly once"
+
+
+def test_reassign_closes_replaced_instrument_before_new_one_opens():
+    registry, Mock = _life_core()
+    registry.connect("GPIB0::5::INSTR")
+    registry.assign("GPIB0::5::INSTR", "LifeDev")   # same type, re-open
+    assert Mock.close_log == ["GPIB0::5::INSTR"], \
+        "old session must close on reassignment"
+    registry.connect("GPIB0::5::INSTR")
+    assert Mock.init_log.count("GPIB0::5::INSTR") == 2
+    assert len(Mock.close_log) == 1
+
+
+def test_driver_without_close_shuts_down_quietly():
+    tmp = make_core(tempfile.mkdtemp())
+    with open(os.path.join(tmp, "resources", "NoClose.py"), "w") as fh:
+        fh.write("class NoClose:\n"
+                 "    def __init__(self, adress=None):\n"
+                 "        self.set_options=['V']; self.get_options=['V']\n"
+                 "    def V(self): return 0\n"
+                 "    def set_V(self, value=None, speed=None): pass\n")
+    registry = DeviceRegistry(tmp)
+    registry.assign("COM3", "NoClose")
+    registry.connect("COM3")
+    registry.disconnect_all()                # no close() -> no error
+
+
+def test_broken_close_does_not_block_siblings():
+    tmp = make_core(tempfile.mkdtemp())
+    with open(os.path.join(tmp, "resources", "BadClose.py"), "w") as fh:
+        fh.write("class BadClose:\n"
+                 "    def __init__(self, adress=None):\n"
+                 "        self.adress=adress\n"
+                 "        self.set_options=['V']; self.get_options=['V']\n"
+                 "    def V(self): return 0\n"
+                 "    def set_V(self, value=None, speed=None): pass\n"
+                 "    def close(self): raise IOError('bus dead')\n")
+    with open(os.path.join(tmp, "resources", "GoodClose.py"), "w") as fh:
+        fh.write("from tests.mock_driver import MockDevice\n"
+                 "class GoodClose(MockDevice):\n    pass\n")
+    import tests.mock_driver as md
+    md.MockDevice.close_log.clear()
+    registry = DeviceRegistry(tmp)
+    registry.assign("A1", "BadClose")
+    registry.assign("A2", "GoodClose")
+    registry.connect("A1")
+    registry.connect("A2")
+    registry.disconnect_all()                # A1 raises inside close()
+    assert "A2" in md.MockDevice.close_log, \
+        "one broken close() must not block the other instruments"
+
+
 if __name__ == "__main__":
     import traceback
     passed = failed = 0

@@ -53,6 +53,39 @@ __all__ = ["SweepEngine"]
 _FMT = "{:.3e}".format          # legacy axis-value formatting in CSV rows
 
 
+def check_start_positions(registry, program) -> list[dict]:
+    """Pre-flight: which axes stand away from their sweep start?
+
+    For every loop axis whose parameter is readable, compare the current
+    value with the first walk's start point against the device's eps
+    (falling back to the axis step). Returns one dict per offender —
+    the GUI raises the v1-style 'Start warning' dialog from this.
+    Unreadable parameters and failed/NaN readbacks are skipped (nothing
+    to warn about without a position).
+    """
+    out = []
+    for ax in program.axes:
+        try:
+            adapter = registry.connect(ax.device)
+        except Exception:                          # noqa: BLE001
+            continue
+        if not adapter.can_read(ax.parameter):
+            continue
+        try:
+            v = float(adapter.get(ax.parameter))
+        except Exception:                          # noqa: BLE001
+            continue
+        if not np.isfinite(v):
+            continue
+        eps = adapter.eps(ax.parameter,
+                          fallback=max(ax.step_size(False), 1e-12))
+        if abs(v - float(ax.start)) > eps:
+            out.append({"device": ax.device, "parameter": ax.parameter,
+                        "current": v, "start": float(ax.start),
+                        "eps": float(eps)})
+    return out
+
+
 class _AxisFault(RuntimeError):
     """A device the sweep depends on failed (NaN / dead readback / set
     failure) — the whole sweep stops with a message naming the device."""
@@ -98,7 +131,8 @@ class SweepEngine(threading.Thread):
         self._points_done = 0
         self._durations: deque[float] = deque(maxlen=25)
         self._was_paused = False
-        self._snake_backward: dict[int, bool] = {}
+        self._snake_entry: dict[int, bool] = {}
+        self._stall_streak: dict[int, int] = {}
 
     # ---------------- public control (GUI thread) ----------------------
     def set_paused(self, paused: bool) -> None:
@@ -177,7 +211,7 @@ class SweepEngine(threading.Thread):
         for i, ax in enumerate(prog.axes):
             if i == solved:
                 continue
-            total *= max(ax.planned_count(), 1) * max(ax.walks, 1)
+            total *= max(ax.planned_count(), 1) * ax.effective_walks()
         return total
 
     # ---------------- pause / stop / to-zero gate ----------------------
@@ -350,31 +384,52 @@ class SweepEngine(threading.Thread):
 
     # ---------------- walks --------------------------------------------
     def _direction(self, axis_i: int, walk_no: int) -> bool:
+        """Walk direction. Plain axes alternate per walk starting forward.
+
+        Snake axes alternate their ENTRY direction across outer points so
+        the instrument continues from where it stands instead of jumping
+        back. The entry flag is pure state read here and updated once per
+        completed walk-set in the loop (geometric continuation: the next
+        entry is the opposite of the last walk's direction) — the old
+        version toggled state on every call, which only happened to be
+        right for an odd number of walks and silently degenerated for
+        even counts (e.g. a return sweep implying two walks).
+        """
         ax = self.live.axis(axis_i)
+        alt = walk_no % 2 == 1
         if ax.snake:
-            back = self._snake_backward.get(axis_i, False)
-            self._snake_backward[axis_i] = not back
-            return back
-        return walk_no % 2 == 1
+            return self._snake_entry.get(axis_i, False) != alt
+        return alt
 
     def _walks_of(self, axis_i: int) -> int:
-        return max(int(self.live.axis(axis_i).walks), 1)
+        return self.live.axis(axis_i).effective_walks()
 
-    def _measure_walk(self, axis_i: int, backward: bool) -> None:
+    def _measure_walk(self, axis_i: int, backward: bool,
+                      first_walk: bool = True) -> None:
         ax = self.live.axis(axis_i)
         adapter = self._adapters[axis_i]
         continuous = (adapter.sweepable(ax.parameter)
                       and not ax.force_stepwise
                       and ax.manual_points is None)
         if continuous:
-            if self._measure_walk_continuous(axis_i, backward):
+            if self._measure_walk_continuous(axis_i, backward, first_walk):
                 return
             # invalid rate / configuration -> warned; run stepwise instead
-        self._measure_walk_stepwise(axis_i, backward)
+        self._measure_walk_stepwise(axis_i, backward, first_walk)
 
-    def _measure_walk_stepwise(self, axis_i: int, backward: bool) -> None:
+    def _measure_walk_stepwise(self, axis_i: int, backward: bool,
+                               first_walk: bool = True) -> None:
         adapter = self._adapters[axis_i]
+        approached = not first_walk
         for pt in self.runners[axis_i].walk(backward):
+            # A continuation walk starts exactly at the turning point the
+            # previous walk just set and measured — the map grid counts the
+            # turn ONCE, so re-setting and re-measuring it would duplicate
+            # a row and shift every later cell. Skip it; a fresh walk (or
+            # a live-edited start elsewhere) is still taken in full.
+            if not first_walk and pt.index == 0 and \
+                    abs(pt.value - self.axis_values[axis_i]) <= 1e-12:
+                continue
             self._gate()
             self._refresh_condition()
             candidate = dict(
@@ -387,11 +442,20 @@ class SweepEngine(threading.Thread):
                     self._map.add_skipped(pt.value)
                 self._emit(PointSkipped(axis_values=tuple(self.axis_values)))
                 continue
+            if not approached:
+                approached = True
+                if self.live.get().approach_start:
+                    self._approach_axis(axis_i, pt.value)
             ax = self.live.axis(axis_i)
             # a self-ramping instrument stepped point-by-point still gets a
             # speed, so each step ramps at the configured rate instead of
-            # slewing at the instrument's maximum
-            speed = abs(ax.rate) if adapter.sweepable(ax.parameter) else None
+            # slewing at the instrument's maximum — the RETURN rate on
+            # backward walks, not the forward one
+            if adapter.sweepable(ax.parameter):
+                speed = abs(ax.back_rate if backward
+                            and ax.back_rate is not None else ax.rate)
+            else:
+                speed = None
             self._apply_axis(axis_i, pt.value, speed=speed)
             self._solve_coupled()
             self._was_paused = False
@@ -420,7 +484,8 @@ class SweepEngine(threading.Thread):
             return None
         return rate
 
-    def _measure_walk_continuous(self, axis_i: int, backward: bool) -> bool:
+    def _measure_walk_continuous(self, axis_i: int, backward: bool,
+                                 first_walk: bool = True) -> bool:
         """Device ramps itself. Two phases, both live-editable:
 
         1. **approach** — ramp to the walk's *start* point first (no data
@@ -440,13 +505,35 @@ class SweepEngine(threading.Thread):
                 is None:
             return False
         self._eps_warned = getattr(self, "_eps_warned", set())
-        if not self._ramp_phase(axis_i, backward, approach=True):
-            return True                      # aborted (already reported)
-        self._ramp_phase(axis_i, backward, approach=False)
+        self._approach_moved = False
+        if self.live.get().approach_start:
+            if not self._ramp_phase(axis_i, backward, approach=True):
+                self._note_stall(axis_i)     # aborted (already reported)
+                return True
+        if self._ramp_phase(axis_i, backward, approach=False,
+                            record_start=first_walk
+                            or self._approach_moved):
+            self._stall_streak[axis_i] = 0   # healthy walk resets
+        else:
+            self._note_stall(axis_i)
         return True
 
+    def _note_stall(self, axis_i: int) -> None:
+        """One aborted walk is a glitch the sweep survives; the SECOND in
+        a row means the instrument is wedged — stopping every later row
+        would just burn the night writing flat data, so stop the sweep
+        with a message naming the device."""
+        n = self._stall_streak.get(axis_i, 0) + 1
+        self._stall_streak[axis_i] = n
+        if n >= 2:
+            ax = self.live.axis(axis_i)
+            raise _AxisFault(
+                f"{ax.device}.{ax.parameter}: two consecutive walks "
+                f"aborted (instrument not following its setpoint) — "
+                f"sweep stopped")
+
     def _ramp_phase(self, axis_i: int, backward: bool,
-                    approach: bool) -> bool:
+                    approach: bool, record_start: bool = True) -> bool:
         adapter = self._adapters[axis_i]
         param = self.live.axis(axis_i).parameter
         last_ver = -1
@@ -490,6 +577,8 @@ class SweepEngine(threading.Thread):
                     if (target - v_now) * travel <= eps:
                         self.axis_values[axis_i] = target
                         return True               # already there
+                    if approach:
+                        self._approach_moved = True   # start point changed
                 else:
                     # blind start: command anyway; the travel direction is
                     # derived from the first finite readback instead — a
@@ -499,8 +588,10 @@ class SweepEngine(threading.Thread):
                 last_ver, self._was_paused = ver, False
                 stalled_s, prev_dist, warned_stall = 0.0, None, False
                 if not approach and not recorded_initial \
-                        and np.isfinite(v_now):
-                    # the walk's start value is a data point too
+                        and record_start and np.isfinite(v_now):
+                    # the walk's start value is a data point too — but a
+                    # continuation walk starts at the turn point already
+                    # measured by the previous walk (grid counts it once)
                     recorded_initial = True
                     self.axis_values[axis_i] = v_now
                     self._solve_coupled()
@@ -543,6 +634,8 @@ class SweepEngine(threading.Thread):
                 bad_s, warned_bad = 0.0, False     # recovered
             if travel is None:                     # first finite readback
                 travel = 1.0 if target >= v else -1.0
+            if approach:
+                self._emit(AxisStepped(axis=axis_i + 1, value=v))
             if not approach:
                 self.axis_values[axis_i] = v
                 self._solve_coupled()
@@ -551,20 +644,34 @@ class SweepEngine(threading.Thread):
                 self.axis_values[axis_i] = target
                 return True
             # ---- stall watchdog ---------------------------------------
+            # progress = getting closer than the best distance so far by a
+            # NOISE MARGIN — a jittery readback (a real magnet's gauss-level
+            # noise) must not keep resetting the timer while the field is
+            # actually stuck
             dist = abs(target - v)
-            if prev_dist is not None and prev_dist - dist <= \
-                    max(eps * 0.01, 1e-15):
-                stalled_s += delay
-            else:
+            margin = max(eps * 0.5, rate * delay * 0.25, 1e-12)
+            if prev_dist is None or dist < prev_dist - margin:
+                prev_dist = dist if prev_dist is None else min(prev_dist,
+                                                               dist)
                 stalled_s = 0.0
                 warned_stall = False
-            prev_dist = dist
+            else:
+                stalled_s += delay
             if stalled_s >= self.STALL_WARN_S and not warned_stall:
                 warned_stall = True
                 self._emit(SweepError(where="sweepable", crucial=True,
                                       message=(
                     f"{dev_name} readback stopped moving at {v:g} "
-                    f"(target {target:g}) — check the instrument")))
+                    f"(target {target:g}) — re-sending the command")))
+                # RETRY: an intermittently lost/ignored command (network
+                # instruments!) must cost seconds, not the whole row
+                try:
+                    adapter.set(param, target, speed=rate)
+                except Exception as exc:          # noqa: BLE001
+                    raise _AxisFault(
+                        f"{dev_name}: re-sending the setpoint failed "
+                        f"({type(exc).__name__}: {exc}) — sweep stopped") \
+                        from exc
             if stalled_s >= self.STALL_ABORT_S:
                 self._emit(SweepError(where="sweepable", crucial=True,
                                       message=(
@@ -572,6 +679,48 @@ class SweepEngine(threading.Thread):
                     f"for {stalled_s:.0f} s) — walk aborted")))
                 self.axis_values[axis_i] = v
                 return False
+
+    def _approach_axis(self, axis_i: int, target: float) -> None:
+        """Walk a STEPWISE axis from wherever the instrument currently sits
+        to the sweep's entry point, in that axis's own step/delay — the
+        legacy 'initial step' behaviour, for any dimension. Without it a
+        device parked away from the start boundary received one big jump.
+
+        Walks up to (not including) the target: the caller's normal apply
+        performs the final set, so the entry point is set exactly once.
+        No rows are recorded — this is positioning, not measurement.
+        """
+        adapter = self._adapters[axis_i]
+        ax = self.live.axis(axis_i)
+        if not adapter.can_read(ax.parameter):
+            return                          # unknown position -> direct set
+        try:
+            v = float(adapter.get(ax.parameter))
+        except Exception:                   # noqa: BLE001
+            return
+        if not np.isfinite(v):
+            return
+        step = ax.step_size(False)
+        if step <= 0 or abs(target - v) <= step:
+            return                          # one normal set covers it
+        sign = 1.0 if target > v else -1.0
+        sweepable = adapter.sweepable(ax.parameter)
+        speed = abs(ax.rate) if sweepable else None
+        while sign * (target - (v + sign * step)) > step * 1e-9:
+            self._gate()
+            v += sign * step
+            try:
+                adapter.set(ax.parameter, float(v), speed=speed)
+            except Exception as exc:        # noqa: BLE001
+                raise _AxisFault(
+                    f"{ax.device}.{ax.parameter}: setting the value failed "
+                    f"during the approach ({type(exc).__name__}: {exc}) — "
+                    f"sweep stopped") from exc
+            self.axis_values[axis_i] = float(v)
+            self._emit(AxisStepped(axis=axis_i + 1, value=float(v)))
+            self._sleep(ax.point_delay(False))
+            ax = self.live.axis(axis_i)     # live-editable step/delay
+            step = max(ax.step_size(False), step * 0.0) or step
 
     def _settle_axis(self, axis_i: int, value: float,
                      backward: bool) -> None:
@@ -619,16 +768,22 @@ class SweepEngine(threading.Thread):
             if (value - v) * travel <= eps:
                 return
             dist = abs(value - v)
-            if prev_dist is not None and prev_dist - dist <= \
-                    max(eps * 0.01, 1e-15):
-                stalled_s += 0.1
-            else:
+            margin = max(eps * 0.5, rate * 0.1 * 0.25, 1e-12)
+            if prev_dist is None or dist < prev_dist - margin:
+                prev_dist = dist if prev_dist is None else min(prev_dist,
+                                                               dist)
                 stalled_s, warned = 0.0, False
-            prev_dist = dist
+            else:
+                stalled_s += 0.1
             if stalled_s >= self.STALL_WARN_S and not warned:
                 warned = True
                 self._error("sweepable", RuntimeError(
-                    f"{param} stuck at {v:g} while moving to {value:g}"))
+                    f"{param} stuck at {v:g} while moving to {value:g} — "
+                    f"re-sending the command"))
+                try:
+                    adapter.set(param, float(value), speed=rate)
+                except Exception:                 # noqa: BLE001
+                    pass
             if stalled_s >= self.STALL_ABORT_S:
                 self._error("sweepable", RuntimeError(
                     f"{param} never settled at {value:g} — continuing with "
@@ -659,7 +814,8 @@ class SweepEngine(threading.Thread):
         while walk_no < self._walks_of(axis_i):
             backward = self._direction(axis_i, walk_no)
             if last:
-                self._measure_walk(axis_i, backward)
+                self._measure_walk(axis_i, backward,
+                                   first_walk=(walk_no == 0))
             else:
                 for pt in self.runners[axis_i].walk(backward):
                     self._gate()
@@ -669,6 +825,9 @@ class SweepEngine(threading.Thread):
                             and not ax.force_stepwise:
                         self._settle_axis(axis_i, pt.value, backward)
                     else:
+                        if walk_no == 0 and pt.index == 0 \
+                                and self.live.get().approach_start:
+                            self._approach_axis(axis_i, pt.value)
                         self._apply_axis(axis_i, pt.value)
                     self._solve_coupled()
                     self._emit(AxisStepped(axis=axis_i + 1, value=pt.value))
@@ -697,6 +856,10 @@ class SweepEngine(threading.Thread):
                             self._map.new_iteration()
             self._emit(WalkFinished(axis=axis_i + 1, walk=walk_no + 1))
             walk_no += 1
+        if self.live.axis(axis_i).snake:
+            # continue from where the instrument now stands: the next
+            # entry direction is the opposite of the last walk taken
+            self._snake_entry[axis_i] = not backward
 
     # ---------------- main ----------------------------------------------
     def run(self) -> None:

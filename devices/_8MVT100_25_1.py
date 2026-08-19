@@ -421,9 +421,9 @@ class _8MVT100_25_1():
         lib.close_device(byref(cast(self.device_id, POINTER(c_int))))
 
 def main():
-    adress = 'COM5'
+    adress = 'COM4'
     stage = _8MVT100_25_1(adress)  
-    stage.set_position(-30, 5)
+    stage.set_position(20, 5)
 
     try:
         print(f'Current position is {stage.position()}')

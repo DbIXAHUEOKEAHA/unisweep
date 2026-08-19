@@ -2,6 +2,7 @@ from lakeshore import SSMSystem
 from time import sleep
 from math import sqrt
 import pyvisa
+import numpy as np
 
 # Set up GPIB connection to instrument
 rm = pyvisa.ResourceManager()
@@ -36,7 +37,7 @@ class M81_lockin():
         #                 'low_pass_filter_slope']
         
     def LI1_amplitude(self):
-        ans = self.bcs.get_current_amplitude()
+        ans = self.bcs.get_current_amplitude() / np.sqrt(2)
         return ans
 
     def LI1_frequency(self):
@@ -52,7 +53,7 @@ class M81_lockin():
         return ans
     
     def LI3_amplitude(self):
-        ans = self.vs.get_voltage_amplitude()
+        ans = self.vs.get_voltage_amplitude() / np.sqrt(2)
         return ans
 
     def LI3_frequency(self):
@@ -149,7 +150,7 @@ class M81_lockin():
     
     def set_LI1_amplitude(self, value, speed = None):
         #value in amperes
-        self.bcs.set_current_amplitude(value)
+        self.bcs.set_current_amplitude(value * np.sqrt(2))
         
     def set_LI1_frequency(self, value, speed = None):
         self.bcs.set_frequency(value)
@@ -169,7 +170,7 @@ class M81_lockin():
         
     def set_LI3_amplitude(self, value, speed = None):
         #value in amperes
-        self.vs.set_voltage_amplitude(value)
+        self.vs.set_voltage_amplitude(value * np.sqrt(2))
         
     def set_LI3_frequency(self, value, speed = None):
         self.vs.set_frequency(value)
@@ -191,10 +192,10 @@ class M81_lockin():
         self.M81_connection.close()
         
 def main():
-    device = M81_lockin('GPIB0::10::INSTR')
-    loggable = device.loggable
-    for param in loggable:
-        print(f'{param} = {getattr(device, param)()}')
+    device = M81_lockin('GPIB0::9::INSTR.LI')
+    f = device.LI1_amplitude()
+    print(f)
+    device.close()
     
 if __name__ == '__main__':
     main()

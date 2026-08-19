@@ -13,13 +13,13 @@ class sim900():
         self.adress = adress
         self.sim900 = self.sim928 = rm.open_resource(self.adress)
         self.set_options = ['volt1', 'volt2', 'volt3', 'volt4', 'volt5', 'volt6', 'volt7', 'volt8']
-        self.get_options = ['volt1', 'volt2', 'volt3', 'volt4', 'volt5', 'volt6', 'volt7', 'volt8']
+        self.get_options = ['Volt1', 'Volt2', 'Volt3', 'Volt4', 'Volt5', 'Volt6', 'Volt7', 'Volt8']
         
     def idn(self):
         value = get(self.sim900, '*IDN?')
         return value
         
-    def volt1(self):
+    def Volt1(self):
         ''' returns voltage of 1st port
         '''
         time.sleep(0.02)
@@ -28,7 +28,7 @@ class sim900():
         self.sim900.write('\n')
         return float(value)
     
-    def volt2(self):
+    def Volt2(self):
         ''' returns voltage of 2nd port
         '''
         time.sleep(0.02)
@@ -37,7 +37,7 @@ class sim900():
         self.sim900.write('\n')
         return float(value)
     
-    def volt3(self):
+    def Volt3(self):
         ''' returns voltage of 3rd port
         '''
         time.sleep(0.02)
@@ -46,7 +46,7 @@ class sim900():
         self.sim900.write('\n')
         return float(value)
     
-    def volt4(self):
+    def Volt4(self):
         ''' returns voltage of 4th port
         '''
         time.sleep(0.02)
@@ -55,7 +55,7 @@ class sim900():
         self.sim900.write('\n')
         return float(value)
 
-    def volt5(self):
+    def Volt5(self):
         ''' returns voltage of 5th port
         '''
         time.sleep(0.02)
@@ -64,7 +64,7 @@ class sim900():
         self.sim900.write('\n')
         return float(value)
     
-    def volt6(self):
+    def Volt6(self):
         ''' returns voltage of 6th port
         '''
         self.sim900.write('CONN 6, "\n"')
@@ -72,7 +72,7 @@ class sim900():
         self.sim900.write('\n')
         return float(value)
     
-    def volt7(self):
+    def Volt7(self):
         ''' returns voltage of 7th port
         '''
         time.sleep(0.02)
@@ -81,7 +81,7 @@ class sim900():
         self.sim900.write('\n')
         return float(value)
     
-    def volt8(self):
+    def Volt8(self):
         ''' returns voltage of 8th port
         '''
         time.sleep(0.02)

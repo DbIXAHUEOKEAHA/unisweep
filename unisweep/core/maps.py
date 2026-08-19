@@ -80,23 +80,42 @@ def _forward_points(ax) -> np.ndarray:
     return np.array(out, dtype=float)
 
 
-def _monotonic_segments(arr: np.ndarray) -> list[slice]:
-    """Slices of maximal monotonic runs (direction changes = walk turns)."""
+def _monotonic_segments(arr: np.ndarray,
+                        turn_eps: float = 0.0) -> list[slice]:
+    """Slices of maximal monotonic runs (direction changes = walk turns).
+
+    ``turn_eps`` adds hysteresis: a reversal only counts once the values
+    have retreated more than ``turn_eps`` from the running extremum.
+    Measured readbacks carry noise — without this, gauss-level jitter on a
+    flat stretch fragments the row into micro-segments and the segment
+    pairing then discards the real data (the overnight field-map failure).
+    A real snake turn spans the whole axis; noise never exceeds one grid
+    step, so ``turn_eps`` = one grid step separates them cleanly. With
+    ``turn_eps=0`` the behaviour is the exact strict split (used for the
+    planned grid itself, which is noise-free).
+    """
     n = len(arr)
     if n <= 1:
         return [slice(0, n)]
     out = []
     start = 0
     direction = 0
+    ext = float(arr[0])
+    ext_i = 0
     for i in range(1, n):
-        step = arr[i] - arr[i - 1]
-        d = 1 if step > 0 else (-1 if step < 0 else direction)
+        v = float(arr[i])
         if direction == 0:
-            direction = d
-        elif d != 0 and d != direction:
-            out.append(slice(start, i))
-            start = i - 0                # turning point starts the new run
-            direction = d
+            if abs(v - ext) > turn_eps or (turn_eps == 0.0 and v != ext):
+                direction = 1 if v > ext else -1
+                ext, ext_i = v, i
+            continue
+        if (v - ext) * direction >= 0:
+            ext, ext_i = v, i                 # still advancing
+        elif (ext - v) * direction > turn_eps:
+            out.append(slice(start, ext_i + 1))
+            start = ext_i + 1
+            direction = -direction
+            ext, ext_i = v, i
     out.append(slice(start, n))
     return out
 
@@ -109,7 +128,7 @@ def _walk_grid(ax, uniform: bool = False) -> np.ndarray:
     if uniform and len(base) > 1:
         base = np.linspace(float(base[0]), float(base[-1]), len(base))
     parts = []
-    for walk in range(max(int(ax.walks), 1)):
+    for walk in range(ax.effective_walks()):
         g = base if walk % 2 == 0 else base[::-1]
         if walk % 2 == 1:
             g = g[1:]
@@ -437,8 +456,11 @@ class MapWriter:
             out[: min(len(y), n)] = y[:n]
             return out
         out = np.full(n, np.nan)
-        grid_segments = _monotonic_segments(np.asarray(self._grid))
-        sample_segments = _monotonic_segments(x)
+        garr = np.asarray(self._grid, dtype=float)
+        gd = np.abs(np.diff(garr))
+        step_all = float(np.median(gd[gd > 0])) if (gd > 0).any() else 0.0
+        grid_segments = _monotonic_segments(garr)
+        sample_segments = _monotonic_segments(x, turn_eps=step_all)
         for g_sl, s_sl in zip(grid_segments, sample_segments):
             xs, ys = x[s_sl], y[s_sl]
             keep = np.isfinite(xs)
@@ -447,6 +469,7 @@ class MapWriter:
                 continue
             g = np.asarray(self._grid[g_sl], dtype=float)
             if len(xs) == 1:
+                xs_s = xs
                 idx = np.zeros(len(g), dtype=int)
             else:
                 order = np.argsort(xs)
@@ -456,7 +479,17 @@ class MapWriter:
                 idx = np.where(np.abs(g - left) <= np.abs(right - g),
                                pos - 1, pos)
                 ys = ys_s
-            out[g_sl] = ys[idx]
+            vals = ys[idx].astype(float)
+            # VALUE LOCALITY: a cell farther from every sample than ~1.5
+            # grid steps was never measured — it stays NaN. Without this,
+            # a walk that stalled after a handful of samples had its few
+            # flat values smeared across the WHOLE row, fabricating a
+            # complete-looking (and wrong) map line and hiding the fault.
+            if len(g) > 1:
+                step_g = np.median(np.abs(np.diff(g)))
+                radius = max(step_g * 1.5, 1e-30)
+                vals[np.abs(g - xs_s[idx]) > radius] = np.nan
+            out[g_sl] = vals
         return out
 
     def commit_row(self, row_value: float, master_value: float = 0.0):

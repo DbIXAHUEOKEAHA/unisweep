@@ -12,7 +12,7 @@ import tkinter as tk
 from tkinter import ttk
 import tkinter.font as tkfont
 
-PALETTE = {
+DARK = {
     "bg":        "#12161b",   # window
     "surface":   "#191f26",   # page background
     "card":      "#20272f",   # grouped controls
@@ -27,6 +27,71 @@ PALETTE = {
     "red":       "#e5534b",   # LED: error / stop
     "select":    "#294564",
 }
+
+LIGHT = {
+    "bg":        "#e8eaee",
+    "surface":   "#f4f5f7",
+    "card":      "#ffffff",
+    "card_edge": "#d3d8de",
+    "field":     "#fcfdfe",
+    "text":      "#1b2027",
+    "muted":     "#5d6773",
+    "accent":    "#1d6fd6",
+    "accent_hi": "#3f8ae6",
+    "green":     "#1d8a5f",
+    "amber":     "#b07514",
+    "red":       "#c2382f",
+    "select":    "#c7ddf5",
+}
+
+# The LIVE palette. Mutated in place on a theme switch so every module
+# holding a reference to it (and every widget created afterwards) follows.
+PALETTE = dict(DARK)
+
+
+def init_theme(name: str) -> None:
+    """Select the palette BEFORE any widget exists (app start-up)."""
+    PALETTE.clear()
+    PALETTE.update(LIGHT if name == "light" else DARK)
+
+
+#: color-bearing widget options a live re-theme rewrites
+_COLOR_OPTS = ("background", "foreground", "insertbackground",
+               "selectbackground", "selectforeground",
+               "highlightbackground", "highlightcolor",
+               "activebackground", "activeforeground",
+               "readonlybackground", "disabledforeground", "troughcolor")
+
+
+def _remap_colors(widget: tk.Misc, reverse: dict) -> None:
+    """Walk the whole widget tree (Toplevels included) and translate every
+    color that belonged to the OLD palette into the same key of the new
+    one — plain-tk widgets capture colors at creation, so a live switch
+    must rewrite them; anything user-custom (plot line colors) is left
+    untouched because it is not in the map."""
+    for opt in _COLOR_OPTS:
+        try:
+            cur = str(widget.cget(opt)).lower()
+        except tk.TclError:
+            continue
+        key = reverse.get(cur)
+        if key is not None:
+            try:
+                widget.configure({opt: PALETTE[key]})
+            except tk.TclError:
+                pass
+    for child in widget.winfo_children():
+        _remap_colors(child, reverse)
+
+
+def set_theme(root: tk.Tk, name: str) -> None:
+    """Switch dark/light LIVE: ttk styles are reconfigured (all ttk
+    widgets follow instantly) and plain-tk widgets are color-remapped."""
+    old = dict(PALETTE)
+    init_theme(name)
+    apply_theme(root)
+    reverse = {v.lower(): k for k, v in old.items()}
+    _remap_colors(root, reverse)
 
 FONT_UI = None       # filled by apply_theme
 FONT_MONO = None

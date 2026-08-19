@@ -42,19 +42,21 @@ from ..core.maps import index_ticks
 from .theme import PALETTE
 from .widgets import Tooltip, ValidatedEntry
 
-_MPL_DARK = {
-    "figure.facecolor": PALETTE["surface"],
-    "axes.facecolor": PALETTE["bg"],
-    "axes.edgecolor": PALETTE["card_edge"],
-    "axes.labelcolor": PALETTE["text"],
-    "xtick.color": PALETTE["muted"],
-    "ytick.color": PALETTE["muted"],
-    "text.color": PALETTE["text"],
-    "grid.color": PALETTE["card_edge"],
-    "axes.grid": True,
-    "grid.alpha": 0.4,
-    "font.size": 9,
-}
+def _mpl_style() -> dict:
+    """Matplotlib rc matching the CURRENT palette (theme can switch)."""
+    return {
+        "figure.facecolor": PALETTE["surface"],
+        "axes.facecolor": PALETTE["bg"],
+        "axes.edgecolor": PALETTE["card_edge"],
+        "axes.labelcolor": PALETTE["text"],
+        "xtick.color": PALETTE["muted"],
+        "ytick.color": PALETTE["muted"],
+        "text.color": PALETTE["text"],
+        "grid.color": PALETTE["card_edge"],
+        "axes.grid": True,
+        "grid.alpha": 0.4,
+        "font.size": 9,
+    }
 
 REDRAW_MS = 300
 CMAPS = ["viridis", "plasma", "inferno", "magma", "cividis", "jet",
@@ -318,7 +320,7 @@ class PlotWindow(tk.Toplevel):
                 "slave (3D) step, exactly like the legacy live plot.\n"
                 "Off: plot the whole sweep history.")
 
-        with matplotlib.rc_context(_MPL_DARK):
+        with matplotlib.rc_context(_mpl_style()):
             self.figure = Figure(figsize=(4.4, 3.4), dpi=100,
                                  facecolor=PALETTE["surface"])
             self.ax = self.figure.add_subplot(111)
@@ -422,7 +424,7 @@ class PlotWindow(tk.Toplevel):
             return
         self._dirty = False
         try:
-            with matplotlib.rc_context(_MPL_DARK):
+            with matplotlib.rc_context(_mpl_style()):
                 self.figure.clf()
                 self.ax = self.figure.add_subplot(111)
                 if self.config.kind == "map":
@@ -513,7 +515,8 @@ class PlotManager:
         self.windows: list[PlotWindow] = []
         self._templates: dict[str, dict] = self._load_templates()
         self.on_count_changed = lambda n: None
-        master.after(REDRAW_MS, self._tick)
+        self._stopped = False
+        self._after_id = master.after(REDRAW_MS, self._tick)
 
     # ---------------- spawning ----------------------------------------
     def spawn(self, kind: str) -> PlotWindow:
@@ -595,15 +598,39 @@ class PlotManager:
             win.mark_dirty()
 
     def _tick(self):
+        if self._stopped:
+            return
         for win in list(self.windows):
             try:
                 win.redraw_if_dirty()
             except tk.TclError:
                 self.windows.remove(win)
         try:
-            self.master.after(REDRAW_MS, self._tick)
+            self._after_id = self.master.after(REDRAW_MS, self._tick)
         except tk.TclError:
             pass
+
+    def retheme(self):
+        """Follow a live theme switch: figures and toolbars re-colored,
+        every window redrawn under the new rc."""
+        for win in self.windows:
+            try:
+                win.figure.set_facecolor(PALETTE["surface"])
+                win.canvas.get_tk_widget().configure(bg=PALETTE["surface"])
+                win.mark_dirty()
+            except tk.TclError:
+                pass
+
+    def shutdown(self):
+        """Stop the redraw timer and close all windows — called on app
+        exit so no pending timer fires into a destroyed interpreter."""
+        self._stopped = True
+        try:
+            if self._after_id is not None:
+                self.master.after_cancel(self._after_id)
+        except tk.TclError:
+            pass
+        self.close_all()
 
     # ---------------- persistence -------------------------------------
     def save_templates(self):
