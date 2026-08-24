@@ -289,6 +289,7 @@ class PlotWindow(tk.Toplevel):
         self.configure(bg=PALETTE["surface"])
         n = len(manager.windows)
         self.geometry(f"620x470+{140 + 40 * (n % 8)}+{110 + 40 * (n % 8)}")
+        self.attributes("-topmost", True)
         self.minsize(420, 340)
         self.protocol("WM_DELETE_WINDOW", self._close)
 
