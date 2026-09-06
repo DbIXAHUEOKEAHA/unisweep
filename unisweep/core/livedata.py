@@ -26,6 +26,7 @@ class LiveData:
         self.columns: tuple[str, ...] = ()
         self.dimensions = 1
         self.rows: list[tuple] = []
+        self.walks: list[int] = []     # innermost walk per row
         self.axis_points: list[tuple] = []     # (v1..vN) per measured row
         self.skipped: list[tuple] = []         # condition-excluded points
         self.current_file = ""
@@ -37,6 +38,7 @@ class LiveData:
             self.columns = tuple(columns)
             self.dimensions = dimensions
             self.rows.clear()
+            self.walks.clear()
             self.axis_points.clear()
             self.skipped.clear()
             self._scan_marks = [0]
@@ -52,9 +54,11 @@ class LiveData:
             if not self._scan_marks or self._scan_marks[-1] != n:
                 self._scan_marks.append(n)
 
-    def add_row(self, row: tuple, axis_values: tuple) -> None:
+    def add_row(self, row: tuple, axis_values: tuple,
+                walk: int = 1) -> None:
         with self._lock:
             self.rows.append(row)
+            self.walks.append(int(walk))
             self.axis_points.append(axis_values)
 
     def add_skipped(self, axis_values: tuple) -> None:
@@ -86,10 +90,19 @@ class LiveData:
             return out
 
     def xy(self, xcol: str, ycol: str, last: Optional[int] = None,
-           scan_only: bool = False):
+           scan_only: bool = False, walk: Optional[int] = None):
+        """walk=1 keeps only rows of the first innermost walk — the
+        'show 1/n of the data along the fast axis' plot option."""
         start = self.scan_start() if scan_only else 0
-        return (self.column(xcol, last, start),
-                self.column(ycol, last, start))
+        x = self.column(xcol, last, start)
+        y = self.column(ycol, last, start)
+        if walk is not None:
+            with self._lock:
+                tags = self.walks[start:start + len(x)]
+            keep = [i for i, w in enumerate(tags) if w == walk]
+            x = [x[i] for i in keep if i < len(x)]
+            y = [y[i] for i in keep if i < len(y)]
+        return x, y
 
     def map_arrays(self, xcol: str, ycol: str, zcol: str,
                    plane_axis: Optional[int] = None,

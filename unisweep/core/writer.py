@@ -64,14 +64,30 @@ class DataWriter:
         self.columns = tuple(columns)
         self.directory = daily_data_dir(core_dir)
         self.ymd = datetime.today().strftime("%y%m%d")
+        self.ext = ".csv"
         if filename:
-            filename = fix_unicode(filename)
-            self.directory = os.path.dirname(filename) or self.directory
-            base = os.path.basename(filename)
-            stem = base[: base.rfind(".")] if "." in base else base
-            if "-" in stem and stem[stem.rfind("-") + 1:].isdigit():
-                stem = stem[: stem.rfind("-")]
-            self.base = unify_filename(stem)
+            filename = fix_unicode(filename.strip())
+            if filename.endswith(("/", "\\")) or os.path.isdir(filename):
+                # a FOLDER: the usual dated structure goes inside it
+                root = filename.rstrip("/\\") or self.directory
+                self.directory = os.path.join(root, self.ymd,
+                                              "data_files")
+                self.base = self.ymd
+            else:
+                # a NAME (with or without folder/extension): the dated
+                # structure goes into the name's parent folder; the
+                # extension is kept when deliberately given, else .csv
+                parent = os.path.dirname(filename)
+                base = os.path.basename(filename)
+                stem, ext = os.path.splitext(base)
+                if ext:
+                    self.ext = ext
+                if "-" in stem and stem[stem.rfind("-") + 1:].isdigit():
+                    stem = stem[: stem.rfind("-")]
+                self.base = unify_filename(stem) or self.ymd
+                if parent:
+                    self.directory = os.path.join(parent, self.ymd,
+                                                  "data_files")
         else:
             self.base = self.ymd
         os.makedirs(self.directory, exist_ok=True)
@@ -88,7 +104,8 @@ class DataWriter:
         for v in outer_values:
             name += f"_{cut(float(v))}"
         index = _next_index(self.directory, self.base)
-        self.path = os.path.join(self.directory, f"{name}-{index}.csv")
+        self.path = os.path.join(self.directory,
+                                 f"{name}-{index}{self.ext}")
         self._fh = open(self.path, "w", newline="", encoding="utf-8")
         self._writer = csv.writer(self._fh, delimiter=DELIMITER)
         self._writer.writerow(self.columns)

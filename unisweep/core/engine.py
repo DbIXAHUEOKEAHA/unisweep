@@ -41,7 +41,9 @@ import numpy as np
 from .condition import ConditionError, ConditionSet
 from .config import LiveProgram
 from .devices import DeviceRegistry, DriverAdapter
-from .events import (AxisStepped, FileOpened, MapRowCommitted, PointMeasured,
+from .events import (
+    ApproachStarted,
+    ApproachFinished,AxisStepped, FileOpened, MapRowCommitted, PointMeasured,
                      PointSkipped, Progress, SweepError, SweepFinished,
                      SweepPaused, SweepResumed, SweepStarted, WalkFinished)
 from .maps import MapWriter
@@ -133,6 +135,7 @@ class SweepEngine(threading.Thread):
         self._was_paused = False
         self._snake_entry: dict[int, bool] = {}
         self._stall_streak: dict[int, int] = {}
+        self._inner_walk_no = 1
 
     # ---------------- public control (GUI thread) ----------------------
     def set_paused(self, paused: bool) -> None:
@@ -324,7 +327,8 @@ class SweepEngine(threading.Thread):
         self._last_point_t = now
         self._emit(PointMeasured(row=row,
                                  axis_values=tuple(self.axis_values),
-                                 file=self._writer.path or ""))
+                                 file=self._writer.path or "",
+                                 walk=self._inner_walk_no))
         total = self._planned_total()
         eta = None
         if self._durations:
@@ -680,6 +684,169 @@ class SweepEngine(threading.Thread):
                 self.axis_values[axis_i] = v
                 return False
 
+    def _goto_parallel(self, entries, phase: str = "approach") -> None:
+        """Drive several axes toward targets SIMULTANEOUSLY — the sweep
+        start ('all instruments to their initial positions') and the
+        mid-sweep repositioning returns. Sweepable axes get one command
+        each (with retry-at-warn, noise-margin watchdog); stepwise axes
+        are stepped round-robin on their own delays. AxisStepped events
+        stream live positions; ApproachStarted/Finished bracket the
+        phase so the GUI can show a progress window. entries: list of
+        (axis_i, target, use_back_params)."""
+        import time as _time
+        work = []
+        for axis_i, target, back in entries:
+            ax = self.live.axis(axis_i)
+            adapter = self._adapters[axis_i]
+            readable = adapter.can_read(ax.parameter)
+            cur = None
+            if readable:
+                try:
+                    cur = float(adapter.get(ax.parameter))
+                except Exception:               # noqa: BLE001
+                    cur = None
+                if cur is not None and not np.isfinite(cur):
+                    cur = None
+            eps = adapter.eps(ax.parameter,
+                              fallback=max(ax.step_size(back), 1e-12))
+            if cur is None and back:
+                # returns can trust the setpoint the engine tracked
+                cur = float(self.axis_values[axis_i])
+                if not np.isfinite(cur):
+                    cur = None
+            if cur is not None and abs(cur - target) <= eps:
+                self.axis_values[axis_i] = float(target)
+                continue                        # already there
+            work.append({"i": axis_i, "target": float(target),
+                         "back": back, "cur": cur, "eps": eps})
+        if not work:
+            return
+        self._emit(ApproachStarted(
+            targets=tuple((w["i"] + 1, self.live.axis(w["i"]).device,
+                           self.live.axis(w["i"]).parameter,
+                           w["cur"] if w["cur"] is not None
+                           else float("nan"), w["target"])
+                          for w in work),
+            phase=phase))
+        try:
+            self._goto_parallel_run(work)
+        finally:
+            self._emit(ApproachFinished(phase=phase))
+
+    def _goto_parallel_run(self, work) -> None:
+        import time as _time
+        sweeps, steps = [], []
+        for w in work:
+            ax = self.live.axis(w["i"])
+            adapter = self._adapters[w["i"]]
+            rate = abs(ax.back_rate if (w["back"] and ax.back_rate)
+                       else ax.rate) or None
+            if adapter.sweepable(ax.parameter) and not ax.force_stepwise:
+                try:
+                    adapter.set(ax.parameter, w["target"], speed=rate)
+                except Exception as exc:        # noqa: BLE001
+                    raise _AxisFault(
+                        f"{ax.device}.{ax.parameter}: moving to the "
+                        f"initial position failed "
+                        f"({type(exc).__name__}: {exc})") from exc
+                w.update(rate=rate, best=None, stalled=0.0, warned=False,
+                         t_last=_time.perf_counter())
+                sweeps.append(w)
+            else:
+                v0 = w["cur"]
+                if v0 is None:
+                    continue    # unknown position: the walk's own first
+                                # apply will land the start point
+                step = max(ax.step_size(w["back"]), 1e-12)
+                sign = 1.0 if w["target"] > v0 else -1.0
+                spd = rate if adapter.sweepable(ax.parameter) else None
+                w.update(v=v0, step=step, sign=sign, speed=spd,
+                         delay=ax.point_delay(w["back"]),
+                         due=_time.perf_counter(), rate=rate)
+                steps.append(w)
+        while sweeps or steps:
+            self._gate()
+            now = _time.perf_counter()
+            for w in list(steps):
+                if now < w["due"]:
+                    continue
+                ax = self.live.axis(w["i"])
+                nxt = w["v"] + w["sign"] * w["step"]
+                if w["sign"] * (w["target"] - nxt) <= w["step"] * 1e-9:
+                    if w["back"]:
+                        # a RETURN must land exactly (nothing follows);
+                        # an approach stops one step short — the walk's
+                        # first apply sets the start point exactly once
+                        self._apply_axis(w["i"], w["target"],
+                                         speed=w["speed"])
+                        self._emit(AxisStepped(axis=w["i"] + 1,
+                                               value=w["target"]))
+                    steps.remove(w)
+                    continue
+                w["v"] = nxt
+                self._apply_axis(w["i"], nxt, speed=w["speed"])
+                self._emit(AxisStepped(axis=w["i"] + 1, value=nxt))
+                w["due"] = now + max(w["delay"], 1e-3)
+            for w in list(sweeps):
+                ax = self.live.axis(w["i"])
+                adapter = self._adapters[w["i"]]
+                try:
+                    v = float(adapter.get(ax.parameter))
+                except Exception:               # noqa: BLE001
+                    v = float("nan")
+                dt, w["t_last"] = now - w["t_last"], now
+                if np.isfinite(v):
+                    self.axis_values[w["i"]] = v
+                    self._emit(AxisStepped(axis=w["i"] + 1, value=v))
+                    if abs(w["target"] - v) <= w["eps"]:
+                        self.axis_values[w["i"]] = w["target"]
+                        sweeps.remove(w)
+                        continue
+                    dist = abs(w["target"] - v)
+                    margin = max(w["eps"] * 0.5,
+                                 (w["rate"] or 0.0) * 0.1 * 0.25, 1e-12)
+                    if w["best"] is None or dist < w["best"] - margin:
+                        w["best"] = dist if w["best"] is None \
+                            else min(w["best"], dist)
+                        w["stalled"], w["warned"] = 0.0, False
+                    else:
+                        w["stalled"] += dt
+                    if w["stalled"] >= self.STALL_WARN_S \
+                            and not w["warned"]:
+                        w["warned"] = True
+                        self._error("approach", RuntimeError(
+                            f"{ax.device}.{ax.parameter} stuck at {v:g} "
+                            f"moving to {w['target']:g} — re-sending"))
+                        try:
+                            adapter.set(ax.parameter, w["target"],
+                                        speed=w["rate"])
+                        except Exception:       # noqa: BLE001
+                            pass
+                    if w["stalled"] >= self.STALL_ABORT_S:
+                        self._emit(SweepError(where="approach",
+                                              crucial=True, message=(
+                            f"{ax.device}.{ax.parameter}: never reached "
+                            f"its initial position (stuck at {v:g}) — "
+                            f"continuing from there")))
+                        sweeps.remove(w)
+                        continue
+            self._sleep(0.05)
+
+    def _return_level(self, k: int, loop_axes: list[int]) -> None:
+        """After a non-outermost axis finishes its pass: walk it (and the
+        finished inner axes below it, unless they snake) back to their
+        start values TOGETHER — a pure repositioning move, nothing swept,
+        nothing recorded — before the axis above makes its step."""
+        entries = []
+        for j in range(k, len(loop_axes)):
+            axis_i = loop_axes[j]
+            ax = self.live.axis(axis_i)
+            if ax.snake:
+                continue
+            entries.append((axis_i, float(ax.start), True))
+        if entries:
+            self._goto_parallel(entries, phase="return")
+
     def _approach_axis(self, axis_i: int, target: float) -> None:
         """Walk a STEPWISE axis from wherever the instrument currently sits
         to the sweep's entry point, in that axis's own step/delay — the
@@ -811,9 +978,13 @@ class SweepEngine(threading.Thread):
         axis_i = loop_axes[k]
         last = k == len(loop_axes) - 1
         walk_no = 0
-        while walk_no < self._walks_of(axis_i):
+        # a non-innermost axis makes exactly ONE measured pass: walking it
+        # back does NOT replay the whole nested loop — the way back is a
+        # repositioning return (below), never a measurement
+        while walk_no < (self._walks_of(axis_i) if last else 1):
             backward = self._direction(axis_i, walk_no)
             if last:
+                self._inner_walk_no = walk_no + 1
                 self._measure_walk(axis_i, backward,
                                    first_walk=(walk_no == 0))
             else:
@@ -860,6 +1031,11 @@ class SweepEngine(threading.Thread):
             # continue from where the instrument now stands: the next
             # entry direction is the opposite of the last walk taken
             self._snake_entry[axis_i] = not backward
+        if not last and k > 0:
+            # slave (and everything below it) returns to its initial
+            # value before the axis above steps; the outermost never
+            # returns ("don't go back along master")
+            self._return_level(k, loop_axes)
 
     # ---------------- main ----------------------------------------------
     def run(self) -> None:
@@ -892,6 +1068,12 @@ class SweepEngine(threading.Thread):
                     [self.axis_values[j] for j in range(self.dims)
                      if j != loop_axes[-1]])
                 self._emit(FileOpened(path=path, columns=self.columns))
+            if self.live.get().approach_start:
+                # ALL instruments move to their initial positions at
+                # once (parallel), with live progress events
+                self._goto_parallel(
+                    [(i, float(self.live.axis(i).start), False)
+                     for i in loop_axes], phase="approach")
             self._loop_level(0, loop_axes)
         except _Stopped:
             stopped = True

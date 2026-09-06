@@ -115,13 +115,8 @@ class SetGetPage(ttk.Frame):
         self.stop_btn = ttk.Button(bar, text="Stop", state="disabled",
                                    command=self._stop)
         self.stop_btn.pack(side="left")
-        plot_btn = ttk.Button(bar, text="New plot",
-                              command=lambda:
-                              self.app.setget_plots.spawn("line"))
-        plot_btn.pack(side="left", padx=(14, 0))
-        Tooltip(plot_btn, "Open a live graph window of the monitored\n"
-                          "values (against time by default). Spawn as\n"
-                          "many as needed, before or during a monitor.")
+        # the standard "New line plot" button (top right) opens monitor
+        # graphs while this page is active — no separate button needed
         self.live_label = ttk.Label(get_card, text="", style="Muted.TLabel",
                                     justify="left")
         self.live_label.grid(row=3, column=0, columnspan=5, sticky="w",

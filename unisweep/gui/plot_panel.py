@@ -85,6 +85,8 @@ class PlotConfig:
     zmax: Optional[float] = None
     color: str = PALETTE["accent"]
     marker_size: float = 2.5
+    first_walk_only: bool = False      # show 1/n of the fast-axis data
+    on_top: bool = True                # this window above all apps
     cmap: str = "viridis"
     xtransform: str = ""
     ytransform: str = ""
@@ -151,6 +153,12 @@ class PlotSettingsDialog(tk.Toplevel):
                                            allow_empty=True, width=18)
             self.e_ylabel.grid(row=r, column=3, sticky="w"); r += 1
             self.v_scope = tk.BooleanVar(value=(c.scope == "scan"))
+            self.v_walk1 = tk.BooleanVar(value=c.first_walk_only)
+            ttk.Checkbutton(self, text="show only the first walk "
+                                       "(1/n of the fast-axis data)",
+                            variable=self.v_walk1,
+                            style="S.TCheckbutton").grid(
+                row=r, column=0, columnspan=4, sticky="w"); r += 1
             ttk.Checkbutton(self, text="show only the current scan "
                                        "(latest inner sweep)",
                             variable=self.v_scope,
@@ -208,6 +216,12 @@ class PlotSettingsDialog(tk.Toplevel):
                   text="Transforms are expressions in v, e.g. v*1e3, "
                        "log10(abs(v))").grid(
             row=r, column=0, columnspan=4, sticky="w", pady=(2, 6)); r += 1
+        self.v_ontop = tk.BooleanVar(value=c.on_top)
+        ttk.Checkbutton(self, text="keep this window on top of other "
+                                   "applications",
+                        variable=self.v_ontop,
+                        style="S.TCheckbutton").grid(
+            row=r, column=0, columnspan=4, sticky="w", pady=(4, 0)); r += 1
         btns = ttk.Frame(self)
         btns.grid(row=r, column=0, columnspan=4, sticky="e", pady=(6, 0))
         ttk.Button(btns, text="Cancel",
@@ -249,11 +263,19 @@ class PlotSettingsDialog(tk.Toplevel):
             return
         c = self.cfg
         c.title = self.e_title.value() or ""
+        c.on_top = self.v_ontop.get()
+        self.view.set_topmost(c.on_top)
+        if c.kind == "map" and self.view.manager.restyle_images:
+            try:
+                self.view.manager.restyle_images(c)
+            except Exception:                     # noqa: BLE001
+                pass
         if c.kind == "line":
             c.xcol, c.ycol = self.b_x.get(), self.b_y.get()
             c.xlabel = self.e_xlabel.value() or ""
             c.ylabel = self.e_ylabel.value() or ""
             c.logx, c.logy = self.v_logx.get(), self.v_logy.get()
+            c.first_walk_only = self.v_walk1.get()
             c.auto_x = self.v_auto_x.get()
             c.xmin, c.xmax = self.e_xmin.value(), self.e_xmax.value()
             c.auto_y = self.v_auto_y.get()
@@ -289,9 +311,12 @@ class PlotWindow(tk.Toplevel):
         self.configure(bg=PALETTE["surface"])
         n = len(manager.windows)
         self.geometry(f"620x470+{140 + 40 * (n % 8)}+{110 + 40 * (n % 8)}")
-        self.attributes("-topmost", True)
         self.minsize(420, 340)
         self.protocol("WM_DELETE_WINDOW", self._close)
+        self._topmost = False
+        self.bind("<Map>", self._reassert_topmost)
+        if config.on_top:
+            self.set_topmost(True)
 
         head = ttk.Frame(self)
         head.pack(fill="x", padx=8, pady=(8, 0))
@@ -344,6 +369,22 @@ class PlotWindow(tk.Toplevel):
     # -----------------------------------------------------------------
     def open_settings(self):
         PlotSettingsDialog(self)
+
+    def set_topmost(self, flag: bool) -> None:
+        self._topmost = bool(flag)
+        try:
+            self.attributes("-topmost", self._topmost)
+        except tk.TclError:
+            pass
+
+    def _reassert_topmost(self, _event=None):
+        """Minimizing hides the window (naturally not on top); on
+        restore, some window managers forget -topmost — re-apply it."""
+        if self._topmost:
+            try:
+                self.attributes("-topmost", True)
+            except tk.TclError:
+                pass
 
     def _close(self):
         self.manager.remove(self)
@@ -447,7 +488,9 @@ class PlotWindow(tk.Toplevel):
             self.ax.grid(False)
             return
         scan_only = c.scope == "scan" and self.manager.dimensions >= 2
-        x, y = self.manager.data.xy(c.xcol, c.ycol, scan_only=scan_only)
+        x, y = self.manager.data.xy(
+            c.xcol, c.ycol, scan_only=scan_only,
+            walk=1 if c.first_walk_only else None)
         n = min(len(x), len(y))
         x = _apply_transform(c.xtransform, x[:n])
         y = _apply_transform(c.ytransform, y[:n])
@@ -513,6 +556,9 @@ class PlotManager:
         self.dimensions = 1
         self.inner_label = ""
         self.row_label = ""
+        self.topmost = False
+        self.restyle_images = None    # app hook: apply a window's
+                                      # style to saved png/gif files
         self.windows: list[PlotWindow] = []
         self._templates: dict[str, dict] = self._load_templates()
         self.on_count_changed = lambda n: None
@@ -610,6 +656,16 @@ class PlotManager:
             self._after_id = self.master.after(REDRAW_MS, self._tick)
         except tk.TclError:
             pass
+
+    def apply_topmost(self, flag: bool) -> None:
+        """Live toggle for every open window; also the default for new
+        ones (self.topmost)."""
+        self.topmost = bool(flag)
+        for win in self.windows:
+            try:
+                win.set_topmost(self.topmost)
+            except tk.TclError:
+                pass
 
     def retheme(self):
         """Follow a live theme switch: figures and toolbars re-colored,

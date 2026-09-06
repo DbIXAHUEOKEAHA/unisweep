@@ -25,6 +25,7 @@ __all__ = ["AppSettings"]
 class AppSettings:
     # ---- appearance ---------------------------------------------------
     theme: str = "dark"                # 'dark' | 'light'
+    plots_on_top: bool = True          # graph/map windows above all apps
     # ---- map / data output -------------------------------------------
     save_maps: bool = True
     map_style: str = "grid"            # 'grid' | 'xyz' | 'both'

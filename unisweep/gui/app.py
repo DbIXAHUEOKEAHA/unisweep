@@ -89,15 +89,19 @@ class App:
             self.root, self.setget_data, LiveMaps(),
             _os.path.join(core_dir, "config"),
             config_name="plots_setget.json", title_prefix="Monitor · ")
+        self.plots.apply_topmost(self.settings.plots_on_top)
+        self.setget_plots.apply_topmost(self.settings.plots_on_top)
+        self.plots.restyle_images = self._restyle_map_images
         bar = ttk.Frame(right)
         bar.grid(row=0, column=0, sticky="ew")
         ttk.Label(bar, text="Plots", style="MutedS.TLabel").pack(side="left")
         ttk.Button(bar, text="New line plot",
-                   command=lambda: self.plots.spawn("line")).pack(
-            side="left", padx=(10, 2))
-        ttk.Button(bar, text="New map",
-                   command=lambda: self.plots.spawn("map")).pack(
-            side="left", padx=2)
+                   command=lambda: self._active_plots().spawn(
+                       "line")).pack(side="left", padx=(10, 2))
+        self._map_btn = ttk.Button(
+            bar, text="New map",
+            command=lambda: self.plots.spawn("map"))
+        self._map_btn.pack(side="left", padx=2)
         self.plots_count = ttk.Label(bar, text="", style="MutedS.TLabel")
         self.plots_count.pack(side="right")
         self.plots.on_count_changed = lambda n: self.plots_count.configure(
@@ -266,6 +270,79 @@ class App:
             text, done=lambda ok, d: self.event_queue.put(
                 ("notify_result", d)))
 
+    def _restyle_map_images(self, config):
+        """Feature: settings applied to a map window are applied to the
+        saved .png (and .gif) files of that read as well."""
+        from ..core.maps import restyle_saved_images
+        data_dir = getattr(self, "_last_data_dir", "")
+        if not data_dir or not config.zcol:
+            self.status("no saved map images for this sweep yet")
+            return
+        vmin = None if config.auto_z else config.zmin
+        vmax = None if config.auto_z else config.zmax
+        labels = {"param": config.zcol,
+                  "x": config.xlabel or "", "y": config.ylabel or ""}
+
+        def work():
+            n = restyle_saved_images(data_dir, config.zcol, vmin, vmax,
+                                     labels, title=config.title)
+            self.event_queue.put(
+                ("notify_result",
+                 f"plot settings applied to {n} saved image(s)"
+                 if n else "no saved images found for this read"))
+        import threading as _th
+        _th.Thread(target=work, daemon=True).start()
+
+    def _approach_window_open(self, event):
+        """Feature: instruments going to initial positions show live
+        progress in a separate window (one row per instrument)."""
+        self._approach_close()
+        win = tk.Toplevel(self.root)
+        win.title("Going to start positions"
+                  if event.phase == "approach" else
+                  "Returning to initial values")
+        win.configure(bg=PALETTE["surface"])
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        self._approach_win = win
+        self._approach_rows = {}
+        for (axis, dev, param, cur, target) in event.targets:
+            frame = ttk.Frame(win)
+            frame.pack(fill="x", padx=14, pady=6)
+            lbl = ttk.Label(frame, width=44, anchor="w",
+                            text=f"{dev}.{param}:  {cur:.6g} → "
+                                 f"{target:.6g}")
+            lbl.pack(side="left")
+            bar = ttk.Progressbar(frame, length=180, maximum=1.0)
+            bar.pack(side="left", padx=(8, 0))
+            span = abs(target - cur) or 1.0
+            self._approach_rows[axis] = (lbl, bar, dev, param,
+                                         float(target), span)
+        win.update_idletasks()
+
+    def _approach_step(self, axis: int, value: float):
+        row = getattr(self, "_approach_rows", {}).get(axis)
+        if row is None:
+            return
+        lbl, bar, dev, param, target, span = row
+        try:
+            lbl.configure(text=f"{dev}.{param}:  {value:.6g} → "
+                               f"{target:.6g}")
+            bar.configure(value=min(max(
+                1.0 - abs(target - value) / span, 0.0), 1.0))
+        except tk.TclError:
+            pass
+
+    def _approach_close(self):
+        win = getattr(self, "_approach_win", None)
+        if win is not None:
+            try:
+                win.destroy()
+            except tk.TclError:
+                pass
+        self._approach_win = None
+        self._approach_rows = {}
+
     def _start_autoconnect(self):
         """Open every assigned, installed instrument in the background —
         the v1 behaviour: everything ready before the first sweep, no
@@ -306,12 +383,28 @@ class App:
 
     def apply_settings(self):
         """Push app-wide settings where they act immediately."""
+        if hasattr(self, "plots"):        # __init__ calls this early
+            self.plots.apply_topmost(self.settings.plots_on_top)
+            self.setget_plots.apply_topmost(self.settings.plots_on_top)
         from ..core.engine import SweepEngine
         SweepEngine.STALL_WARN_S = float(self.settings.stall_warn_s)
         SweepEngine.STALL_ABORT_S = float(self.settings.stall_abort_s)
 
     # ---------------- navigation --------------------------------------
+    def _active_plots(self):
+        """The usual plot buttons act on the page being viewed: on the
+        Set & Get page they open MONITOR graphs, elsewhere sweep plots
+        (feature: one button, same way as the sweeper menu)."""
+        if getattr(self, "_current_page", "") == "Set & Get":
+            return self.setget_plots
+        return self.plots
+
     def show_page(self, name: str):
+        self._current_page = name
+        if hasattr(self, '_map_btn'):
+            self._map_btn.configure(
+                state='disabled' if name == 'Set & Get'
+                else 'normal')
         for n, btn in self._nav_buttons.items():
             btn.configure(style="NavSel.TButton" if n == name
                           else "Nav.TButton")
@@ -443,9 +536,11 @@ class App:
         elif isinstance(event, ev.FileOpened):
             self._run_file = os.path.basename(event.path)
             self.live_data.new_file(event.path)
+            self._last_data_dir = os.path.dirname(event.path)
             self.file_label.configure(text=event.path)
         elif isinstance(event, ev.PointMeasured):
-            self.live_data.add_row(event.row, event.axis_values)
+            self.live_data.add_row(event.row, event.axis_values,
+                                   walk=event.walk)
             self._update_readings(event.row)
             self.values_label.configure(text="  ".join(
                 f"ax{i + 1}={v:.4g}" for i, v in
@@ -496,7 +591,18 @@ class App:
                         else messagebox.showwarning
                     self.root.after(0, lambda t=title, m=event.message,
                                     fn=show: fn(t, m, parent=self.root))
+        elif isinstance(event, ev.ApproachStarted):
+            self._approach_window_open(event)
+        elif isinstance(event, ev.ApproachFinished):
+            self._approach_close()
+        elif isinstance(event, ev.AxisStepped):
+            self._approach_step(event.axis, event.value)
+            self.values_label.configure(text="  ".join(
+                f"ax{i + 1}={v:.4g}" for i, v in
+                enumerate(self.engine.axis_values))
+                if self.engine else "")
         elif isinstance(event, ev.SweepFinished):
+            self._approach_close()
             self._notify_sweep_end(event)
             self.led.set(PALETTE["muted"] if not event.stopped
                          else PALETTE["red"])

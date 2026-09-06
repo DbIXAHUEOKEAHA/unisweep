@@ -36,11 +36,26 @@ class PointMeasured:
     row: tuple                    # matches columns
     axis_values: tuple            # current setpoints, axis 1..N
     file: str
+    walk: int = 1                 # innermost-axis walk number (1-based)
 
 
 @dataclass(frozen=True)
 class PointSkipped:
     axis_values: tuple            # point excluded by the region condition
+
+
+@dataclass(frozen=True)
+class ApproachStarted:
+    """Instruments start moving toward initial positions (parallel goto:
+    the sweep-start approach or a mid-sweep return). targets: tuples of
+    (axis 1-based, device, parameter, current, target)."""
+    targets: tuple = ()
+    phase: str = "approach"          # 'approach' | 'return'
+
+
+@dataclass(frozen=True)
+class ApproachFinished:
+    phase: str = "approach"
 
 
 @dataclass(frozen=True)

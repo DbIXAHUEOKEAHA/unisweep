@@ -184,33 +184,71 @@ class _Renderer(threading.Thread):
         return os.path.sep.join(parts)
 
     def _render_png(self, table_path, vmin, vmax, labels) -> None:
-        import matplotlib
-        matplotlib.use("Agg", force=False)
-        import matplotlib.pyplot as plt
+        render_table_png(table_path, vmin, vmax, labels)
 
-        rows, header, grid = _read_table(table_path)
-        if rows is None or not len(rows):
-            return
-        y = rows[:, 0]
-        z = rows[:, 1:]
-        image_path = self._image_path(table_path)
-        os.makedirs(os.path.dirname(image_path), exist_ok=True)
-        fig, ax = plt.subplots(figsize=(6, 4.5))
-        if vmin is None or vmax is None:
-            vmin = np.nanmin(z) if np.isfinite(z).any() else 0
-            vmax = np.nanmax(z) if np.isfinite(z).any() else 1
-        m = ax.pcolormesh(np.ma.masked_invalid(z), cmap="viridis",
-                          vmin=vmin, vmax=vmax, shading="flat")
-        cb = fig.colorbar(m, ax=ax)
-        cb.set_label(labels.get("param", ""))
-        ax.set_title(f"Map {labels.get('param', '')}", fontsize=10)
-        ax.set_xlabel(labels.get("x", ""))
-        ax.set_ylabel(labels.get("y", ""))
-        index_ticks(ax, grid, y)
+
+def render_table_png(table_path, vmin, vmax, labels,
+                     title: str = "") -> Optional[str]:
+    """Render (or RE-render) the PNG for one saved map table — the same
+    output the sweep produces, so applying a plot window's settings to
+    the saved images is a matter of calling this again with new style."""
+    import matplotlib
+    matplotlib.use("Agg", force=False)
+    import matplotlib.pyplot as plt
+
+    rows, header, grid = _read_table(table_path)
+    if rows is None or not len(rows):
+        return None
+    y = rows[:, 0]
+    z = rows[:, 1:]
+    image_path = _Renderer._image_path(table_path)
+    os.makedirs(os.path.dirname(image_path), exist_ok=True)
+    fig, ax = plt.subplots(figsize=(6, 4.5))
+    if vmin is None or vmax is None:
+        vmin = np.nanmin(z) if np.isfinite(z).any() else 0
+        vmax = np.nanmax(z) if np.isfinite(z).any() else 1
+    m = ax.pcolormesh(np.ma.masked_invalid(z), cmap="viridis",
+                      vmin=vmin, vmax=vmax, shading="flat")
+    cb = fig.colorbar(m, ax=ax)
+    cb.set_label(labels.get("param", ""))
+    ax.set_title(title or f"Map {labels.get('param', '')}", fontsize=10)
+    ax.set_xlabel(labels.get("x", ""))
+    ax.set_ylabel(labels.get("y", ""))
+    index_ticks(ax, grid, y)
+    try:
+        fig.savefig(image_path, dpi=300, bbox_inches="tight")
+    finally:
+        plt.close(fig)
+    return image_path
+
+
+def restyle_saved_images(data_dir: str, param: str, vmin=None, vmax=None,
+                         labels: Optional[dict] = None,
+                         title: str = "") -> int:
+    """Apply a plot window's settings to every SAVED image of ``param``
+    under ``data_dir`` (tables re-rendered to PNG; iteration GIFs
+    rebuilt when present). Returns how many PNGs were re-rendered."""
+    labels = dict(labels or {})
+    labels.setdefault("param", param)
+    tag = f"_{_safe(param)}_map"
+    tables_root = os.path.join(data_dir, "2d_maps", "tables")
+    n = 0
+    gif_dirs = set()
+    for root, _dirs, names in os.walk(tables_root):
+        for name in names:
+            if tag in name and name.endswith(".csv"):
+                out = render_table_png(os.path.join(root, name),
+                                       vmin, vmax, labels, title=title)
+                if out:
+                    n += 1
+                    gif_dirs.add(os.path.dirname(os.path.dirname(out)))
+    r = _Renderer.__new__(_Renderer)      # gif logic without a thread
+    for d in gif_dirs:
         try:
-            fig.savefig(image_path, dpi=300, bbox_inches="tight")
-        finally:
-            plt.close(fig)
+            r._render_gif(d, param)
+        except Exception:                 # noqa: BLE001
+            pass
+    return n
 
     def _render_gif(self, image_dir: str, param: str) -> None:
         try:

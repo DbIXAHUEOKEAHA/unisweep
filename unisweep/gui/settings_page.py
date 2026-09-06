@@ -42,6 +42,15 @@ class SettingsPage(ttk.Frame):
                   text="Applies immediately to every window, including "
                        "open plots.").grid(row=1, column=0, columnspan=3,
                                            sticky="w", pady=(2, 0))
+        self.v_ontop = tk.BooleanVar(value=st.plots_on_top)
+        cb_top = ttk.Checkbutton(lbody, text="Keep graph and map windows "
+                                             "on top of other applications",
+                                 variable=self.v_ontop,
+                                 command=self._changed)
+        cb_top.grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 2))
+        Tooltip(cb_top, "Plot windows stay visible above any program\n"
+                        "(unless minimized). Applies to open windows\n"
+                        "immediately and to new ones by default.")
 
         # ---------------- map / data output ----------------------------
         maps = Card(self, title="Map data output (2-D / 3-D sweeps)")
@@ -239,6 +248,7 @@ class SettingsPage(ttk.Frame):
         st.map_images = self.v_images.get()
         st.to_zero_default = self.v_tozero.get()
         st.connect_on_start = self.v_autoconn.get()
+        st.plots_on_top = self.v_ontop.get()
         st.tg_enabled = self.v_tg.get()
         st.tg_on_error = self.v_tg_err.get()
         st.tg_token = (self.e_token.value() or "").strip()
