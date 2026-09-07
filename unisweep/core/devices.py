@@ -151,6 +151,50 @@ class DriverAdapter:
 
 
 # ---------------------------------------------------------------------------
+def _driver_class_of(module, mod_name: str):
+    """The driver class inside an imported driver file.
+
+    Legacy drivers do NOT always name the class exactly like the file:
+    ``Keithley2400.py`` defines ``keithley2400`` and ``SR830.py`` defines
+    ``sr830``. Match case-insensitively first, then fall back to the one
+    class the module itself defines that looks like a driver (accepts an
+    ``adress`` argument or declares set/get options) — so a perfectly
+    good driver is never reported as 'not installed'.
+    """
+    # classes DEFINED here win over ones merely imported: SR830.py does
+    # 'from pymeasure...srs import SR830' and defines its own 'sr830' —
+    # the exact-name match must not hand back the vendor base class
+    own = [obj for name, obj in vars(module).items()
+           if inspect.isclass(obj)
+           and getattr(obj, "__module__", "") == module.__name__]
+    for obj in own:
+        if obj.__name__ == mod_name:
+            return obj
+    for obj in own:
+        if obj.__name__.lower() == mod_name.lower():
+            return obj
+    def _driverish(obj) -> bool:
+        if hasattr(obj, "set_options") or hasattr(obj, "get_options"):
+            return True
+        try:
+            params = inspect.signature(obj.__init__).parameters
+        except (TypeError, ValueError):
+            return False
+        return "adress" in params or "address" in params
+    cands = [o for o in own if _driverish(o)]
+    if len(cands) == 1:
+        return cands[0]
+    # several driver-ish classes: prefer the one whose name is closest to
+    # the file name (e.g. 'sr830' over a 'my_SR830' helper subclass)
+    for obj in cands:
+        if mod_name.lower() in obj.__name__.lower():
+            return obj
+    exact = getattr(module, mod_name, None)      # last resort: re-export
+    if inspect.isclass(exact):
+        return exact
+    return None
+
+
 def _import_driver_classes(resources_dir: str
                            ) -> tuple[dict[str, type], dict[str, str]]:
     """Import every ``<Name>.py`` in resources.
@@ -188,12 +232,13 @@ def _import_driver_classes(resources_dir: str
             module = importlib.util.module_from_spec(spec)
             sys.modules[spec.name] = module
             spec.loader.exec_module(module)          # type: ignore[union-attr]
-            cls = getattr(module, mod_name, None)
-            if inspect.isclass(cls):
+            cls = _driver_class_of(module, mod_name)
+            if cls is not None:
                 classes[mod_name] = cls
             else:
-                errors[mod_name] = (f"file imported but defines no class "
-                                    f"'{mod_name}'")
+                errors[mod_name] = (f"file imported but defines no driver "
+                                    f"class (expected something like "
+                                    f"'{mod_name}')")
         except Exception as exc:                     # noqa: BLE001
             errors[mod_name] = f"{type(exc).__name__}: {exc}"
     return classes, errors
@@ -300,19 +345,42 @@ class DeviceRegistry:
         self.save_types()
 
     # ---- driver installation support ------------------------------------
+    def resolve_type(self, class_name: str) -> str:
+        """Assignments may name a driver in a different case than the
+        file on disk (``Keithley2400`` vs ``keithley2400.py``) — resolve
+        to the key actually loaded so the row shows green and connects."""
+        if not class_name or class_name in self.driver_classes:
+            return class_name
+        low = class_name.lower()
+        for key in self.driver_classes:
+            if key.lower() == low:
+                return key
+        for key in self.import_errors:
+            if key.lower() == low:
+                return key
+        return class_name
+
     def is_installed(self, class_name: str) -> bool:
         """Is the driver file present and importable?"""
         if class_name == "Time":
             return True
-        return class_name in self.driver_classes
+        return self.resolve_type(class_name) in self.driver_classes
 
     def import_error(self, class_name: str) -> str:
         """The captured import failure of a present-but-broken driver."""
-        return self.import_errors.get(class_name, "")
+        return self.import_errors.get(self.resolve_type(class_name), "")
 
     def has_driver_file(self, class_name: str) -> bool:
-        return os.path.exists(os.path.join(self.resources_dir,
-                                           f"{class_name}.py"))
+        """Case-insensitively: Windows copies keep the repository's
+        spelling, which may differ from the assignment's."""
+        if not class_name:
+            return False
+        want = f"{class_name}.py".lower()
+        try:
+            return any(f.lower() == want
+                       for f in os.listdir(self.resources_dir))
+        except OSError:
+            return False
 
     def reload_drivers(self) -> None:
         """Re-scan resources/ (after the installer added new files).
@@ -379,7 +447,8 @@ class DeviceRegistry:
                     raise RuntimeError(
                         f"no driver type assigned to '{address}' "
                         f"(Devices page)")
-                cls = self.driver_classes.get(class_name)
+                cls = self.driver_classes.get(
+                    self.resolve_type(class_name))
                 if cls is None:
                     raise RuntimeError(
                         f"driver class '{class_name}' not found in "
@@ -423,7 +492,8 @@ class DeviceRegistry:
         adapter = self.connected(address)
         if adapter is not None:
             return adapter.set_options
-        cls = self.driver_classes.get(self.types.get(address, ""))
+        cls = self.driver_classes.get(
+            self.resolve_type(self.types.get(address, "")))
         if address == "Time":
             return ["Time"]
         if cls is None:
@@ -436,7 +506,8 @@ class DeviceRegistry:
             return adapter.get_options
         if address == "Time":
             return ["Elapsed", "Random"]
-        cls = self.driver_classes.get(self.types.get(address, ""))
+        cls = self.driver_classes.get(
+            self.resolve_type(self.types.get(address, "")))
         if cls is None:
             return []
         return self._probe_options(cls, "get_options")

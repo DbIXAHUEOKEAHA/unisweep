@@ -42,7 +42,7 @@ __all__ = ["DriverEntry", "DriverCatalog", "MODULE_TO_PIP", "STDLIB_OK",
 # discovered automatically (GitHub API first, repository zipball as an
 # API-free fallback) and appended to the catalog; with no connection the
 # catalog silently keeps whatever is installed / cached locally.
-DEFAULT_REPO = "DbIXAHUEOKEAHA/NUS_experiment"
+DEFAULT_REPO = "DbIXAHUEOKEAHA/unisweep"
 DEFAULT_BRANCH = "main"
 DEFAULT_REPO_FOLDER = "devices"
 
@@ -256,6 +256,22 @@ class DriverCatalog:
         return f"{name}{mark}" + (f" — {instrument}" if instrument else "")
 
     # -----------------------------------------------------------------
+    @staticmethod
+    def _name_variants(name: str) -> list[str]:
+        """File names differ in CASE between the catalog and the driver
+        repository (``Keithley2400`` vs ``keithley2400.py``), and raw
+        GitHub URLs are case-sensitive — so every remote lookup tries the
+        sensible variants instead of 404-ing on the first."""
+        out = [name, name.lower(), name.upper(),
+               name[:1].upper() + name[1:].lower(),
+               name[:1].lower() + name[1:]]
+        seen, uniq = set(), []
+        for n in out:
+            if n and n not in seen:
+                seen.add(n)
+                uniq.append(n)
+        return uniq
+
     def source_candidates(self, name: str) -> list[tuple[str, object]]:
         """Where the driver file may be fetched from, in priority order.
 
@@ -266,25 +282,36 @@ class DriverCatalog:
         """
         entry = self.entries.get(name)
         out: list[tuple[str, object]] = []
-        bundle = os.path.join(self.bundle_dir, f"{name}.py")
-        if os.path.exists(bundle):
-            out.append(("file", bundle))
+        variants = self._name_variants(name)
+        for var in variants:
+            bundle = os.path.join(self.bundle_dir, f"{var}.py")
+            if os.path.exists(bundle):
+                out.append(("file", bundle))
+                break
         member = self.zip_member_for(name)
         if member:
             out.append(("zip", (self.snapshot_file, member)))
         if entry and entry.url:
             out.append(("url", entry.url))
-        if name in self.repo_drivers and self.repo_drivers[name]:
-            out.append(("url", self.repo_drivers[name]))
-        if self.base_url:
-            out.append(("url", self.base_url.rstrip("/") + f"/{name}.py"))
-        if self.repo:
-            raw = (f"https://raw.githubusercontent.com/{self.repo}/{{br}}/"
-                   f"{self.repo_folder}/{name}.py")
-            for br in dict.fromkeys([self.branch, "main", "master"]):
-                url = raw.format(br=br)
+        lower_repo = {k.lower(): v for k, v in self.repo_drivers.items()}
+        for var in variants:
+            url = lower_repo.get(var.lower())
+            if url and ("url", url) not in out:
+                out.append(("url", url))
+        for var in variants:
+            if self.base_url:
+                url = self.base_url.rstrip("/") + f"/{var}.py"
                 if ("url", url) not in out:
                     out.append(("url", url))
+        if self.repo:
+            raw = ("https://raw.githubusercontent.com/{repo}/{br}/"
+                   "{folder}/{var}.py")
+            for br in dict.fromkeys([self.branch, "main", "master"]):
+                for var in variants:
+                    url = raw.format(repo=self.repo, br=br,
+                                     folder=self.repo_folder, var=var)
+                    if ("url", url) not in out:
+                        out.append(("url", url))
         return out
 
     # ---------------- remote repository ------------------------------
@@ -447,11 +474,14 @@ class DriverCatalog:
         snap = self.snapshot()
         if not snap:
             return None
+        wanted = {f"{v}.py".lower() for v in self._name_variants(name)}
         try:
             with zipfile.ZipFile(snap) as z:
                 for member in z.namelist():
                     parts = member.split("/")
-                    if len(parts) == 3 and parts[1] == self.repo_folder                             and parts[2] == f"{name}.py":
+                    if len(parts) == 3 \
+                            and parts[1].lower() == self.repo_folder.lower() \
+                            and parts[2].lower() in wanted:
                         return member
         except (OSError, zipfile.BadZipFile):
             return None

@@ -302,6 +302,16 @@ class DevicesPage(ttk.Frame):
         for i, addr in enumerate(self.registry.addresses):
             self.rows[addr] = DeviceRow(self.scroll.inner, self, addr, i)
 
+    def on_show(self):
+        """Opening the page re-scans resources/ so a driver file copied
+        in by hand while the program is running is picked up without a
+        restart."""
+        try:
+            self.app.registry.reload_drivers()
+        except Exception:                          # noqa: BLE001
+            pass
+        self.refresh_rows()
+
     def refresh_rows(self):
         if set(self.rows) != set(self.registry.addresses):
             self.rebuild_rows()

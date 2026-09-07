@@ -401,6 +401,9 @@ class App:
 
     def show_page(self, name: str):
         self._current_page = name
+        page = self.pages.get(name)
+        if hasattr(page, "on_show"):
+            page.on_show()
         if hasattr(self, '_map_btn'):
             self._map_btn.configure(
                 state='disabled' if name == 'Set & Get'
