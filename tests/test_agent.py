@@ -502,6 +502,34 @@ def test_unknown_control_suggests_the_real_names(session):
     assert "walks" in str(excinfo.value)
 
 
+@pytest.mark.parametrize("separator", [" \u2014 ", " - ", " \u2013 ",
+                                       " | ", "  "])
+def test_a_bare_address_matches_whatever_separates_the_label(separator):
+    """The separator in 'ADDRESS — Driver' is a display detail, and the
+    option strings come back out of Tk — so the rule must never name it.
+    Splitting on a literal ' \u2014 ' looked equivalent and was not."""
+    options = ["Time", f"SMU{separator}Mock", f"LOCKIN{separator}Mock",
+               "BARE"]
+    assert ctl._match_option("SMU", options, "x") == options[1]
+    assert ctl._match_option("smu", options, "x") == options[1]
+    assert ctl._match_option("BARE", options, "x") == "BARE"
+    assert ctl._match_option(options[1], options, "x") == options[1]
+
+
+def test_a_prefix_that_is_not_a_boundary_is_not_a_match():
+    with pytest.raises(ControlError):
+        ctl._match_option("SMU", ["SMU2 - a", "NOPE"], "x")
+
+
+def test_an_unmatched_option_reports_the_raw_strings():
+    """A look-alike character is invisible in a console; repr is not."""
+    with pytest.raises(ControlError) as excinfo:
+        ctl._match_option("SMU", ["SMUX - a", "SMUY - b"], "x")
+    message = str(excinfo.value)
+    assert "closest" in message
+    assert repr("SMUX - a") in message
+
+
 def test_device_choice_accepts_the_bare_address_and_repopulates(session):
     session.set_controls({"sweep.axis1.device": "GATE"})
     values = session.read_controls(["sweep.axis1.device",

@@ -393,7 +393,7 @@ class AgentSession:
                 return True
             if time.perf_counter() >= deadline:
                 return False
-            time.sleep(0.02)
+            self.bridge.wait(0.02)
 
     # ---- running-sweep control ---------------------------------------
     def pause(self) -> dict:

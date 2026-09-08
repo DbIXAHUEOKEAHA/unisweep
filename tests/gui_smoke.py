@@ -33,6 +33,17 @@ for _name in ("showinfo", "showwarning", "showerror"):
             lambda t, m="", *a, _n=_name, **k: _boxes.append((_n, t, m)))
 tkinter.messagebox.askyesno = lambda *a, **k: False        # decline dialogs
 
+# ---- Spyder/IPython runfile guard -----------------------------------
+# main.py carries one for the same reason: this file is usually run with
+# Spyder's runfile, in a kernel that may already hold a half-reloaded
+# unisweep tree from an earlier run. A test that imports a stale module
+# tests nothing — and reports failures that cannot be reproduced from the
+# source on disk. Purge before the first unisweep import.
+for _name in [_m for _m in list(sys.modules)
+              if _m == "unisweep" or _m.startswith("unisweep.")
+              or _m == "tests.mock_driver"]:
+    del sys.modules[_name]
+
 from tests.mock_driver import MockDevice                    # noqa: E402
 from unisweep.core.devices import DriverAdapter, VirtualTime  # noqa: E402
 import unisweep.gui.app as appmod                           # noqa: E402
@@ -477,9 +488,12 @@ def control_surface_check():
 
     # ---- 5. run one short sweep the way an assistant would -----------
     started = session.run_sweep({
+        # walks/snake are set explicitly: phase 2 left them at 2/True on
+        # the page, and a program that does not say is a program that
+        # inherits whatever the last person did
         "axes": [{"device": "SMU", "parameter": "Volt", "start": 0.0,
                   "stop": 0.4, "rate": 0.1, "delay": 0.01,
-                  "count_mode": "step"}],
+                  "count_mode": "step", "walks": 1, "snake": False}],
         "reads": ["SMU.Volt"]})
     assert started["started"], started
     for _ in range(200):

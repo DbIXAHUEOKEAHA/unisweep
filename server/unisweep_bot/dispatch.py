@@ -14,10 +14,8 @@ but not watching.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.error import (BadRequest, Forbidden, NetworkError, RetryAfter,
                             TimedOut)
@@ -28,22 +26,6 @@ from .formatting import esc, fmt_age, age_seconds, split_message
 logger = logging.getLogger(__name__)
 
 CAPTION_LIMIT = 1000          # Telegram allows 1024; leave room for entities
-
-
-def _markup(spec):
-    if not spec:
-        return None
-    if isinstance(spec, str):
-        try:
-            spec = json.loads(spec)
-        except ValueError:
-            return None
-    try:
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton(b["text"], callback_data=b["data"])
-             for b in row] for row in spec])
-    except Exception:                                  # noqa: BLE001
-        return None
 
 
 async def _drop_chat(chat_id: int) -> None:
@@ -58,7 +40,6 @@ async def _send_one(bot, row: dict) -> bool:
     chat is gone); False to leave it for the next tick."""
     chat_id = int(row["chat_id"])
     body = row["body"] or ""
-    markup = _markup(row.get("markup"))
     chunks = split_message(body)
     try:
         if row.get("photo"):
@@ -69,17 +50,14 @@ async def _send_one(bot, row: dict) -> bool:
                 caption = caption[:CAPTION_LIMIT]
             await bot.send_photo(chat_id=chat_id, photo=bytes(row["photo"]),
                                  caption=caption,
-                                 parse_mode=ParseMode.HTML,
-                                 reply_markup=markup if not rest else None)
-            for i, chunk in enumerate(rest):
-                await bot.send_message(
-                    chat_id=chat_id, text=chunk, parse_mode=ParseMode.HTML,
-                    reply_markup=markup if i == len(rest) - 1 else None)
+                                 parse_mode=ParseMode.HTML)
+            for chunk in rest:
+                await bot.send_message(chat_id=chat_id, text=chunk,
+                                       parse_mode=ParseMode.HTML)
         else:
-            for i, chunk in enumerate(chunks):
-                await bot.send_message(
-                    chat_id=chat_id, text=chunk, parse_mode=ParseMode.HTML,
-                    reply_markup=markup if i == len(chunks) - 1 else None)
+            for chunk in chunks:
+                await bot.send_message(chat_id=chat_id, text=chunk,
+                                       parse_mode=ParseMode.HTML)
         return True
     except Forbidden:
         await _drop_chat(chat_id)

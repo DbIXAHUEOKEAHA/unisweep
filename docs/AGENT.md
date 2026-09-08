@@ -212,15 +212,33 @@ newline-delimited JSON-RPC, for the same reason `notify.py` talks to
 Telegram with `urllib`: this runs in whatever Python a lab machine has,
 next to pyvisa and a vendor DLL.
 
-**Testing.** `tests/test_agent.py` and `tests/test_mcp.py` cover the
-control layer, dialogs, the tap, the session and the wire protocol against
-duck-typed widgets and a real socket — no display needed. The real widgets
-are exercised by `control_surface_check()` in `tests/gui_smoke.py`:
+**Testing, in three layers.** They catch different things, and the middle
+one exists because the other two could not.
+
+1. **Logic, no display.** `tests/test_agent.py` and `tests/test_mcp.py`
+   cover the control layer, dialogs, the event tap, the session and the
+   wire protocol against duck-typed widgets and a real socket. Runs
+   anywhere.
+2. **Binding, against real Tk.** `tests/test_controls_tk.py` drives each
+   binder against an actual `ttk` widget. This layer was added after a
+   bug that layer 1 *could not* find: `ttk.Button.invoke()` does not
+   propagate an exception raised inside the command — tkinter catches it,
+   hands it to the root's `report_callback_exception`, and returns
+   normally. Every press therefore reported success, including presses
+   that failed and presses that asked a question nobody answered. A fake
+   button calls its command directly and raises, so the fakes were all
+   green. Skipped automatically without tkinter or a display.
+3. **The whole window.** `control_surface_check()` in
+   `tests/gui_smoke.py` builds the real application and reads *every*
+   control on it, fills the sweep page in, presses buttons through their
+   real dialogs, and runs a short sweep end to end.
 
 ```
-xvfb-run -a python tests/gui_smoke.py      # Linux
-python tests\gui_smoke.py                  # Windows
+xvfb-run -a python -m pytest tests/ -q        # layers 1 and 2, Linux
+xvfb-run -a python tests/gui_smoke.py         # layer 3, Linux
+python -m pytest tests\ -q                    # layers 1 and 2, Windows
+python tests\gui_smoke.py                     # layer 3, Windows
 ```
 
-That one reads *every* control on the real pages, which is what catches a
-binder pointed at a widget that has been renamed.
+On a headless Linux box, `apt-get install python3-tk xvfb` is all layers
+2 and 3 need.

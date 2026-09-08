@@ -24,20 +24,52 @@ STATE_ICON = {
     "error": "🔴",
 }
 
+#: Preference key -> what a person calls it, and the word they type to
+#: change it.  Order is the order /alerts prints them in: the ones people
+#: actually want first.
 KIND_LABEL = {
-    "started": "sweep started",
-    "finished": "sweep finished / stopped",
+    "finished": "when a sweep ends",
     "error": "errors",
-    "guard": "guard trips",
-    "paused": "pause and resume",
-    "file": "each new data file",
-    "silent": "rig went silent",
-    "progress": "progress pings",
-    "photo": "attach a plot when a sweep ends",
+    "guard": "safety stops",
+    "silent": "the computer going quiet",
+    "started": "when a sweep starts",
+    "paused": "pausing and resuming",
+    "file": "every new data file",
+    "photo": "a picture with the sweep-ended message",
+    "progress": "progress updates",
 }
 
-#: what a freshly linked chat gets.  The noisy kinds are off: a 2-D sweep
+#: What people type for each of them.  Generous on purpose — nobody
+#: should have to guess whether it is "error" or "errors".
+PREF_WORDS = {
+    "finished": ("ends", "end", "finished", "finish", "done"),
+    "error": ("errors", "error"),
+    "guard": ("safety", "guard", "guards"),
+    "silent": ("quiet", "silent", "silence", "offline"),
+    "started": ("starts", "start", "started"),
+    "paused": ("pause", "paused", "pausing"),
+    "file": ("files", "file"),
+    "photo": ("picture", "photo", "plot", "image"),
+    "progress": ("progress",),
+}
+
+
+def pref_key(word: str) -> str:
+    """Turn what somebody typed into a preference key, or ``''``."""
+    word = str(word or "").strip().lower()
+    for key, words in PREF_WORDS.items():
+        if word == key or word in words:
+            return key
+    return ""
+
+#: What a freshly linked chat gets.  The noisy kinds are off: a 2-D sweep
 #: opens a file per row, and progress pings are for people who ask.
+#:
+#: ``photo`` is off too, and that one is about cost rather than noise: a
+#: rendered plot is thousands of times the bytes of the sentence next to
+#: it, and the sentence is what you actually read at 3 a.m.  Anyone who
+#: wants the picture on every finish can switch it on in /notify, and
+#: /plot is always a tap away.
 DEFAULT_PREFS = {
     "started": False,
     "finished": True,
@@ -46,7 +78,7 @@ DEFAULT_PREFS = {
     "paused": False,
     "file": False,
     "silent": True,
-    "photo": True,
+    "photo": False,
     "progress_min": 0,          # 0 = off, otherwise minutes between pings
     "cmap": "viridis",
     "read": "",                 # last parameter this chat plotted
@@ -158,28 +190,30 @@ def unpack_snapshot(blob: bytes) -> Optional[dict]:
 
 # --------------------------------------------------------------- views ---
 def rig_line(link: dict) -> str:
-    state = (link.get("state") or {})
-    if isinstance(state, str):
-        try:
-            state = json.loads(state)
-        except ValueError:
-            state = {}
+    """One setup, one line — for the list and for headers."""
+    state = state_of(link)
     sweep = state.get("state", link.get("last_push_state") or "idle")
     icon = STATE_ICON.get(sweep, "⚪")
     seen = age_seconds(link.get("last_seen"))
-    stale = "" if (seen is not None and seen < 180) else "  ·  not reporting"
-    return f"{icon} {link.get('rig_name') or link.get('rig_id')} — {sweep}{stale}"
+    quiet = "" if (seen is not None and seen < 180) else "  ·  gone quiet"
+    return (f"{icon} {link.get('rig_name') or link.get('rig_id')} "
+            f"— {sweep}{quiet}")
 
 
-def status_text(link: dict, snapshot: Optional[dict],
-                snap_age: Optional[float]) -> str:
-    """The /status answer: what the rig is doing, and its latest readings."""
+def state_of(link: dict) -> dict:
     state = link.get("state") or {}
     if isinstance(state, str):
         try:
             state = json.loads(state)
         except ValueError:
             state = {}
+    return state if isinstance(state, dict) else {}
+
+
+def status_text(link: dict, snapshot: Optional[dict],
+                snap_age: Optional[float]) -> str:
+    """What the setup is doing, in the order somebody wants to know it."""
+    state = state_of(link)
     sweep = state.get("state", link.get("last_push_state") or "idle")
     icon = STATE_ICON.get(sweep, "⚪")
     name = link.get("rig_name") or link.get("rig_id")
@@ -189,41 +223,39 @@ def status_text(link: dict, snapshot: Optional[dict],
     if prog.get("total"):
         done, total = int(prog.get("done", 0)), int(prog["total"])
         pct = 100.0 * done / total if total else 0.0
-        bar = _bar(pct)
-        lines.append(f"{bar} {pct:.0f}%  ({done}/{total})")
-    if prog.get("eta_s") is not None:
-        lines.append(f"elapsed {fmt_duration(prog.get('elapsed_s'))} · "
-                     f"ETA {fmt_duration(prog.get('eta_s'))}")
+        lines.append("")
+        lines.append(f"{_bar(pct)} {pct:.0f}%   {done:,} of {total:,} points"
+                     .replace(",", " "))
+        if prog.get("eta_s") is not None:
+            lines.append(f"{fmt_duration(prog.get('elapsed_s'))} in, "
+                         f"about {fmt_duration(prog.get('eta_s'))} left")
 
     program = state.get("program") or {}
     axes = program.get("axes") or []
     if axes:
         lines.append("")
-        for i, ax in enumerate(axes, start=1):
-            role = "fast" if i == len(axes) else ("slow" if i == len(axes) - 1
-                                                  else f"axis {i}")
+        width = max((len(str(a.get("label", "?"))) for a in axes), default=8)
+        for ax in axes:
             lines.append(
-                f"<code>ax{i}</code> {esc(ax.get('label', '?'))}: "
-                f"{fmt_value(ax.get('start'))} → {fmt_value(ax.get('stop'))}"
-                f"  <i>({role})</i>")
+                f"<code>{esc(str(ax.get('label', '?')).ljust(width))}  "
+                f"{fmt_value(ax.get('start'))} → "
+                f"{fmt_value(ax.get('stop'))}</code>")
     if program.get("file"):
-        lines.append(f"file <code>{esc(program['file'])}</code>")
+        lines.append(f"<code>{esc(program['file'])}</code>")
 
     last = state.get("last_row") or {}
     if last:
         lines.append("")
-        lines.append("<b>Latest readings</b>")
-        lines.append("<pre>" + _kv_table(last) + "</pre>")
+        lines.append("<b>Latest</b>")
+        lines.append("<pre>" + esc(_kv_table(last)) + "</pre>")
 
     lines.append("")
-    lines.append(f"rig reported {fmt_age(age_seconds(link.get('last_seen')))}"
-                 + (f" · data {fmt_age(snap_age)}"
-                    if snap_age is not None else ""))
+    lines.append(f"updated {esc(fmt_age(age_seconds(link.get('last_seen'))))}")
     return "\n".join(lines)
 
 
 def table_text(snapshot: dict, rows: int = 12) -> str:
-    """The tail of the data table — the 'snapshot of the data table'."""
+    """The most recent measured rows."""
     table = (snapshot or {}).get("table") or {}
     cols = list(table.get("columns") or [])
     data = list(table.get("rows") or [])[-rows:]
@@ -231,8 +263,11 @@ def table_text(snapshot: dict, rows: int = 12) -> str:
         return "No rows yet."
     keep = cols[:8]
     idx = [cols.index(c) for c in keep]
-    widths = [max(len(c), 10) for c in keep]
-    out = ["  ".join(c.rjust(w)[:w] for c, w in zip(keep, widths))]
+    # the writer marks swept columns "<device>.<param>_sweep"; that suffix
+    # is for the file on disk, not for somebody reading a phone
+    shown = [c[:-6] if c.endswith("_sweep") else c for c in keep]
+    widths = [max(len(c), 10) for c in shown]
+    out = ["  ".join(c.rjust(w)[:w] for c, w in zip(shown, widths))]
     for row in data:
         cells = []
         for j, w in zip(idx, widths):
@@ -240,15 +275,17 @@ def table_text(snapshot: dict, rows: int = 12) -> str:
                          .rjust(w)[:w])
         out.append("  ".join(cells))
     text = "\n".join(out)
-    more = ("\n\n… showing the last %d of %d rows, %d of %d columns"
-            % (len(data), table.get("total", len(data)), len(keep), len(cols)))
+    total = int(table.get("total", len(data)))
+    more = f"\nlast {len(data)} of {total} rows"
+    if len(keep) < len(cols):
+        more += f", {len(keep)} of {len(cols)} columns"
     return f"<pre>{esc(text)}</pre>{esc(more)}"
 
 
 def stats_text(snapshot: dict) -> str:
     stats = (snapshot or {}).get("stats") or {}
     if not stats:
-        return "No statistics yet."
+        return "Nothing measured yet."
     lines = [f"{'parameter':<22}{'min':>13}{'max':>13}{'mean':>13}{'last':>13}"]
     for name, s in list(stats.items())[:20]:
         lines.append(f"{name[:21]:<22}"

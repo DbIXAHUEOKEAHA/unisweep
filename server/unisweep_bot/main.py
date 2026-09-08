@@ -23,8 +23,8 @@ import time
 
 from aiohttp import web
 from telegram import BotCommand
-from telegram.ext import (ApplicationBuilder, CallbackQueryHandler,
-                          CommandHandler, MessageHandler, filters)
+from telegram.ext import (ApplicationBuilder, CommandHandler,
+                          MessageHandler, filters)
 from telegram.request import HTTPXRequest
 
 from . import config, db, dispatch, handlers, ingest
@@ -39,20 +39,19 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
 logger = logging.getLogger("unisweep-bot")
 
+#: What Telegram shows in the command menu.  Written the way somebody
+#: would say it out loud, not the way the code thinks about it.
 COMMANDS = [
-    BotCommand("link", "Connect a setup with its 6-digit code"),
-    BotCommand("menu", "Everything, with buttons"),
-    BotCommand("status", "State, progress and latest readings"),
-    BotCommand("table", "The tail of the data table"),
-    BotCommand("plot", "A parameter against the fast axis"),
-    BotCommand("map", "A parameter over the 2-D grid"),
-    BotCommand("stats", "min / max / mean per parameter"),
-    BotCommand("rigs", "Switch between linked rigs"),
-    BotCommand("notify", "Choose what I tell you about"),
-    BotCommand("control", "Pause or stop a sweep"),
-    BotCommand("unlink", "Stop updates from a rig"),
-    BotCommand("id", "Your Telegram id"),
-    BotCommand("help", "All commands"),
+    BotCommand("status", "How the sweep is going"),
+    BotCommand("data", "The latest numbers"),
+    BotCommand("line", "Line scan of one parameter"),
+    BotCommand("map", "2-D map of one parameter"),
+    BotCommand("stats", "Smallest, largest, average"),
+    BotCommand("setups", "Your setups, and which one I answer about"),
+    BotCommand("alerts", "What I message you about"),
+    BotCommand("stop", "Stop the sweep"),
+    BotCommand("unlink", "Stop messages from this setup"),
+    BotCommand("help", "What I can do"),
 ]
 
 
@@ -116,22 +115,24 @@ def build_application():
         .build()
     )
     app.add_handler(CommandHandler("start", handlers.start))
-    app.add_handler(CommandHandler("help", handlers.help_cmd))
+    app.add_handler(CommandHandler(["help", "menu"], handlers.help_cmd))
     app.add_handler(CommandHandler("id", handlers.whoami))
-    app.add_handler(CommandHandler("menu", handlers.menu))
-    app.add_handler(CommandHandler("rigs", handlers.rigs))
     app.add_handler(CommandHandler("status", handlers.status))
-    app.add_handler(CommandHandler("table", handlers.table))
-    app.add_handler(CommandHandler("stats", handlers.stats))
-    app.add_handler(CommandHandler("plot", handlers.plot))
+    # the older names still work: people who learned them should not have
+    # to relearn anything to keep using the bot
+    app.add_handler(CommandHandler(["data", "table"], handlers.data))
+    app.add_handler(CommandHandler(["line", "plot"], handlers.line))
     app.add_handler(CommandHandler("map", handlers.map_cmd))
-    app.add_handler(CommandHandler("notify", handlers.notify))
-    app.add_handler(CommandHandler("control", handlers.control))
+    app.add_handler(CommandHandler("stats", handlers.stats))
+    app.add_handler(CommandHandler(["setups", "rigs"], handlers.setups))
+    app.add_handler(CommandHandler(["alerts", "notify"], handlers.alerts))
     app.add_handler(CommandHandler("unlink", handlers.unlink))
-    app.add_handler(CommandHandler("link", handlers.link_code))
-    app.add_handler(CallbackQueryHandler(handlers.on_button))
-    # last: anything that is not a command. Six digits pair a setup, which
-    # is what people actually send after reading a code off the screen.
+    app.add_handler(CommandHandler("pause", handlers.pause))
+    app.add_handler(CommandHandler("resume", handlers.resume))
+    app.add_handler(CommandHandler("stop", handlers.stop))
+    app.add_handler(CommandHandler(["zero", "tozero"], handlers.to_zero))
+    # last: anything that is not a command.  Six digits is a pairing code,
+    # which is what people send after reading one off the screen.
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,
                                    handlers.on_text))
     app.add_error_handler(handlers.on_error)
@@ -146,7 +147,7 @@ def main() -> None:
             logger.info("starting…")
             application.run_polling(
                 drop_pending_updates=True,
-                allowed_updates=["message", "callback_query"],
+                allowed_updates=["message"],
                 bootstrap_retries=-1,
             )
             logger.info("stopped cleanly — exiting")

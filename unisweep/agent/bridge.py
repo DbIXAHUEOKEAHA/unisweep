@@ -17,6 +17,7 @@ through, not the primary defence.
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any, Callable, Optional
 
 __all__ = ["BridgeError", "BridgeTimeout", "TkBridge", "DirectBridge"]
@@ -48,6 +49,29 @@ class TkBridge:
     @property
     def on_ui_thread(self) -> bool:
         return threading.get_ident() == self.owner_thread
+
+    def wait(self, seconds: float) -> None:
+        """Let time pass without starving the GUI.
+
+        On a background thread — where the agent normally lives — this is
+        a sleep. On the UI thread it has to run the event loop as well,
+        or nothing the GUI is waiting on will ever arrive: the engine
+        posts into a queue that only the Tk pump drains, so a plain sleep
+        there waits for an event it is itself preventing.
+        """
+        end = time.perf_counter() + max(float(seconds), 0.0)
+        while True:
+            remaining = end - time.perf_counter()
+            if remaining <= 0:
+                return
+            if self.on_ui_thread and self.root is not None:
+                try:
+                    self.root.update()
+                except Exception:                  # noqa: BLE001
+                    return                         # window gone
+                time.sleep(min(remaining, 0.01))
+            else:
+                time.sleep(min(remaining, 0.02))
 
     def call(self, fn: Callable[..., Any], *args,
              timeout: Optional[float] = None, **kwargs) -> Any:
@@ -93,6 +117,9 @@ class DirectBridge:
 
     def close(self) -> None:
         return
+
+    def wait(self, seconds: float) -> None:
+        time.sleep(max(float(seconds), 0.0))
 
     def call(self, fn: Callable[..., Any], *args,
              timeout: Optional[float] = None, **kwargs) -> Any:

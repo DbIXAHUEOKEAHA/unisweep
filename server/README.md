@@ -16,24 +16,33 @@ notices and says so.
 
 | In Telegram | |
 |---|---|
-| `/menu` | everything, with buttons |
-| `/status` | state, progress bar, ETA, the latest readings |
-| `/table` | the tail of the data table |
-| `/plot` | a read parameter against the **fast (innermost) axis**, as a PNG |
-| `/map` | a read parameter over the 2-D grid, as a PNG |
+| `/status` | state, progress, the latest readings |
+| `/data` | the most recent measured rows |
+| `/line` | one parameter against the **fast (innermost) axis**, as a PNG |
+| `/map` | one parameter over the 2-D grid, as a PNG |
 | `/stats` | min / max / mean / last per parameter |
-| `/notify` | which events to receive, per person, per setup |
-| `/control` | pause, stop, or stop-and-ramp-to-zero (only if the rig allows it) |
-| `/rigs`, `/unlink`, `/id`, `/link 123456` | | 
+| `/setups` | list the setups this chat holds codes for, and switch |
+| `/alerts` | which events to receive, per person, per setup |
+| `/pause` `/resume` `/stop` `/zero` | only if the setup allows it; stopping asks twice |
+| `/unlink`, `/help`, `/id` | |
 
-Unprompted, it writes when a sweep **finishes or is stopped** (with a plot
-attached), when an **error or a guard** stops one, and when a rig that was
-sweeping **stops reporting**. Every one of those is a per-person toggle;
-the noisy ones (sweep started, each new file, progress pings) are off by
-default.
+No inline keyboards anywhere, and no `/link`: six digits *is* a pairing
+code, so the plain-text handler takes it. The older command names
+(`/table`, `/plot`, `/rigs`, `/notify`, `/menu`) still work as aliases.
 
-Plots are drawn here, from a decimated copy of the data the rig pushes —
-so asking for a different parameter costs the measurement computer nothing.
+Unprompted, it writes when a sweep **finishes or is stopped**, when an
+**error or a guard** stops one, and when a setup that was sweeping **stops
+reporting**. All of those are text. Every one is a per-person toggle; the
+noisy ones (sweep started, each new file, progress pings) are off by
+default, and so is attaching a plot to the sweep-ended message — the
+sentence is what you read at 3 a.m., and `/plot` is a tap away when you
+want the picture.
+
+Plots are drawn here, from a decimated copy of the data the setup pushes,
+so asking for a different parameter costs the measurement computer
+nothing. They are sized for a phone (about 800 px) and re-encoded down to
+a reduced palette, which puts a line plot or a heat map at roughly 15 kB
+instead of 70.
 
 ---
 

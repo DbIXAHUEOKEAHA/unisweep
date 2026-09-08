@@ -128,6 +128,16 @@ def _decimate(seq, limit: int):
     return idx
 
 
+#: What the engine calls a guard action, and what it means to a person.
+_GUARD_ACTION = {
+    "warn": "carrying on, but watch it",
+    "pause": "sweep paused",
+    "back_off": "backed off and ended this line",
+    "stop": "sweep stopped",
+    "to_zero": "sweep stopped, ramping everything to zero",
+}
+
+
 def _basename(path: str) -> str:
     """Windows or POSIX — the data files come from either."""
     return str(path or "").replace("\\", "/").rstrip("/").split("/")[-1]
@@ -324,9 +334,9 @@ class TelegramLink:
                 self._last_row = {}
                 self._run_started = time.time()
                 self._program = self._describe_program()
+                planned = f"{self._progress['total']:,}".replace(",", " ")
                 self._queue("started",
-                            f"▶️ Sweep started — {self._dimensions}-D, "
-                            f"{self._progress['total']} points planned"
+                            f"▶️ Sweep started — {planned} points"
                             + (f"\n{self._program_line()}"
                                if self._program_line() else ""))
                 self._force_snapshot = True
@@ -359,18 +369,21 @@ class TelegramLink:
                 if fatal or crucial:
                     icon = "🔴" if fatal else "⚠️"
                     self._queue("error",
-                                f"{icon} {getattr(event, 'where', 'sweep')}: "
-                                f"{getattr(event, 'message', '')}"
-                                + ("\nThe sweep is stopping."
+                                f"{icon} {getattr(event, 'where', 'sweep')} "
+                                f"— {getattr(event, 'message', '')}"
+                                + ("\nStopping the sweep."
                                    if fatal else ""))
             elif name == "GuardTripped":
                 if getattr(event, "applied", False):
                     values = getattr(event, "values", {}) or {}
                     shown = ", ".join(
                         f"{k}={_num(v)}" for k, v in list(values.items())[:6])
+                    action = _GUARD_ACTION.get(
+                        str(getattr(event, "action", "")),
+                        str(getattr(event, "action", "?")))
                     self._queue(
                         "guard",
-                        f"🛡 Guard tripped → {getattr(event, 'action', '?')}"
+                        f"🛡 Safety limit reached — {action}"
                         + (f"\n{getattr(event, 'message', '')}"
                            if getattr(event, "message", "") else "")
                         + (f"\n{shown}" if shown else ""))
@@ -381,10 +394,11 @@ class TelegramLink:
                 elapsed = (time.time() - self._run_started
                            if self._run_started else
                            self._progress.get("elapsed_s") or 0)
-                head = "⛔ Sweep STOPPED" if stopped else "✅ Sweep finished"
+                head = "⛔ Sweep stopped" if stopped else "✅ Sweep finished"
+                counted = f"{points:,}".replace(",", " ")
                 self._queue(
                     "finished",
-                    f"{head} — {_fmt_duration(elapsed)}, {points} points"
+                    f"{head} — {_fmt_duration(elapsed)}, {counted} points"
                     + (f"\n{_basename(self._file)}" if self._file else ""))
                 self._force_snapshot = True
                 self._run_started = None
@@ -640,10 +654,14 @@ class TelegramLink:
             return {}
 
     def _program_line(self) -> str:
+        """The axes, as somebody would read them out: name, from, to."""
         axes = (self._program or {}).get("axes") or []
+        if not axes:
+            return ""
+        width = max(len(str(a.get("label", "?"))) for a in axes)
         return "\n".join(
-            f"ax{i}: {a['label']}  {a['start']} → {a['stop']}"
-            for i, a in enumerate(axes, start=1))
+            f"{str(a.get('label', '?')).ljust(width)}  {a.get('start')} → "
+            f"{a.get('stop')}" for a in axes)
 
     def _state_payload(self) -> dict:
         program = self._describe_program() or self._program

@@ -35,6 +35,7 @@ a display.
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Optional, Sequence
 
@@ -159,8 +160,15 @@ def _match_option(value, options: Sequence[str], name: str) -> str:
     """Accept what a person would type, not only the exact display string.
 
     Device pickers show ``'GPIB0::4::INSTR — keithley2400'``; naming the
-    bare address has to work, because that is what programs and profiles
-    use everywhere else.
+    bare address has to work, because that is what programs, lab profiles
+    and the CSV columns use everywhere else.
+
+    The bare-address rule matches a **prefix ending at a non-alphanumeric
+    boundary**, not one particular separator. Splitting on a literal
+    ``' — '`` looked equivalent and was not: the option strings come back
+    out of Tk, and whether the dash survives that round trip byte-for-byte
+    depends on the platform's encoding. A rule that never names the
+    separator cannot be broken by it.
     """
     text = "" if value is None else str(value)
     options = [str(o) for o in options]
@@ -168,16 +176,28 @@ def _match_option(value, options: Sequence[str], name: str) -> str:
         return text
     if text in options:
         return text
-    lowered = text.strip().lower()
+    stripped = text.strip()
+    lowered = stripped.lower()
     for option in options:                         # case-insensitive
         if option.strip().lower() == lowered:
             return option
-    for option in options:                         # 'ADDR — Driver' -> ADDR
-        if option.split(" — ")[0].strip().lower() == lowered:
-            return option
+    if stripped:                                   # 'ADDR <sep> Driver'
+        prefixed = [o for o in options
+                    if o.strip().lower().startswith(lowered)
+                    and (len(o.strip()) == len(stripped)
+                         or not o.strip()[len(stripped)].isalnum())]
+        if len(prefixed) == 1:
+            return prefixed[0]
+    detail = ", ".join(options[:20]) + (" …" if len(options) > 20 else "")
+    near = [o for o in options if lowered and lowered in o.strip().lower()]
+    if near:
+        # A near miss almost always means the strings differ in a character
+        # that looks identical on screen. Show them exactly, so the next
+        # person to read this traceback can see the codepoints.
+        detail += ("; closest " + ", ".join(repr(o) for o in near[:3])
+                   + f" against {text!r}")
     raise ControlError(
-        f"'{text}' is not one of the options for '{name}': "
-        + ", ".join(options[:20]) + (" …" if len(options) > 20 else ""))
+        f"'{text}' is not one of the options for '{name}': {detail}")
 
 
 def _to_bool(value, name: str) -> bool:
@@ -355,6 +375,46 @@ def multichoice(name, listbox, *, label, page, help=""):
                    enabled_fn=_enabled_of(listbox), help=help)
 
 
+@contextlib.contextmanager
+def _callback_errors(widget):
+    """Collect the exceptions Tk would otherwise swallow.
+
+    A widget callback that raises does **not** propagate out of
+    ``invoke()``: tkinter catches it, hands it to the root's
+    ``report_callback_exception``, and returns normally. Left alone that
+    makes every press report success — including a press the GUI refused,
+    and one that asked a question nobody answered.
+
+    Redirected for the duration of a single press. That press runs on the
+    Tk thread, so nothing else can be reporting at the same moment.
+    """
+    collected: list = []
+    root = None
+    getter = getattr(widget, "_root", None)
+    if callable(getter):
+        try:
+            root = getter()
+        except Exception:                          # noqa: BLE001
+            root = None
+    if root is None:                               # duck-typed: it raises
+        yield collected
+        return
+    had_own = "report_callback_exception" in vars(root)
+    previous = getattr(root, "report_callback_exception", None)
+    root.report_callback_exception = \
+        lambda kind, exc, tb: collected.append(exc)
+    try:
+        yield collected
+    finally:
+        if had_own:
+            root.report_callback_exception = previous
+        else:
+            try:
+                del root.report_callback_exception
+            except Exception:                      # noqa: BLE001
+                pass
+
+
 def action(name, button, *, label, page, help="", disabled_hint=""):
     """A button. Pressing runs exactly the command the click would run."""
     enabled = _enabled_of(button)
@@ -364,7 +424,13 @@ def action(name, button, *, label, page, help="", disabled_hint=""):
             raise ControlError(
                 f"'{name}' is greyed out right now"
                 + (f" — {disabled_hint}" if disabled_hint else ""))
-        return button.invoke()
+        with _callback_errors(button) as failures:
+            result = button.invoke()
+        if failures:
+            raise failures[0]
+        # invoke() hands back the Tcl result of the command as a string;
+        # a command that returned nothing comes back as the string 'None'
+        return None if result in ("", "None", None) else result
 
     return Control(name=name, kind="action", label=label, page=page,
                    presser=press, enabled_fn=enabled, help=help)
@@ -526,6 +592,14 @@ class ControlRegistry:
                         "dialogs": [r.to_dict() for r in exc.transcript],
                         "needs_answer": exc.record.to_dict(),
                         "error": str(exc)}
+            except ControlError:
+                raise                  # the caller's mistake, not the GUI's
+            except Exception as exc:                   # noqa: BLE001
+                # The GUI raised while handling the press. Tk would have
+                # swallowed it; surfacing it is the whole point.
+                return {"pressed": name, "ok": False,
+                        "dialogs": script.records(),
+                        "error": f"{type(exc).__name__}: {exc}"}
             return {"pressed": name, "ok": True,
                     "dialogs": script.records(),
                     "result": _plain(result)}

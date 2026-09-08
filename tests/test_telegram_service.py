@@ -65,6 +65,21 @@ def test_defaults_are_quiet_where_it_matters():
     # a 2-D sweep opens a file per row: that must not be a message each
     assert not prefs["file"] and not prefs["started"]
     assert prefs["progress_min"] == 0
+    # the sweep-ended message is text. A picture costs thousands of times
+    # the bytes of the sentence people actually read, and /plot is a tap
+    # away for the times you want one.
+    assert not prefs["photo"]
+
+
+def test_figures_are_encoded_small_enough_to_send_freely():
+    """A phone shows these about 800 px wide; anything more is bytes for
+    nothing.  The palette pass is what keeps them cheap."""
+    line = render.render_trace(_trace(600), ["LOCKIN.X", "LOCKIN.Y"], "rig")
+    assert len(line) < 30_000, len(line)
+    heat = render.render_map(_map(140, 140), "LOCKIN.X", "rig")
+    assert len(heat) < 30_000, len(heat)
+    # still PNG: JPEG rings around thin lines and small type
+    assert line[:4] == b"\x89PNG" and heat[:4] == b"\x89PNG"
 
 
 def test_stored_preferences_win_but_unknown_keys_are_ignored():
@@ -97,10 +112,14 @@ def test_status_text_reports_state_progress_and_readings():
                       "last_row": {"LOCKIN.X": 1.25e-6}}}
     text = fmt.status_text(link, {}, 12.0)
     assert "ATTODRY" in text and "running" in text
-    assert "25%" in text and "(50/200)" in text
-    assert "ETA 1 h 00 m" in text
-    assert "GATE.Volt" in text and "(fast)" in text
+    # plain words, not the shape the code happens to store it in
+    assert "25%" in text and "50 of 200 points" in text
+    assert "about 1 h 00 m left" in text
+    assert "GATE.Volt" in text and "MAG.Field" in text
     assert "1.25e-06" in text
+    # jargon that means nothing to somebody holding a phone
+    for word in ("fast", "slow", "ETA", "rig ", "snapshot"):
+        assert word not in text, word
 
 
 def test_table_text_shows_the_tail():
@@ -119,8 +138,8 @@ def test_rig_line_marks_a_rig_that_stopped_reporting():
              "last_seen": datetime.now(timezone.utc)}
     stale = {"rig_name": "B", "state": {"state": "running"},
              "last_seen": datetime.now(timezone.utc) - timedelta(hours=2)}
-    assert "not reporting" not in fmt.rig_line(fresh)
-    assert "not reporting" in fmt.rig_line(stale)
+    assert "gone quiet" not in fmt.rig_line(fresh)
+    assert "gone quiet" in fmt.rig_line(stale)
 
 
 # ---------------------------------------------------------------- render --
@@ -229,26 +248,51 @@ def test_every_rig_event_kind_maps_to_a_preference():
         assert kind in ingest.EVENT_PREF
 
 
-def test_inline_markup_is_built_from_the_stored_spec():
-    from unisweep_bot import dispatch
-    spec = [[{"text": "Menu", "data": "menu:home"},
-             {"text": "Plot", "data": "menu:plot"}]]
-    markup = dispatch._markup(spec)
-    assert markup.inline_keyboard[0][0].callback_data == "menu:home"
-    assert dispatch._markup(json.dumps(spec)) is not None
-    assert dispatch._markup(None) is None
-    assert dispatch._markup("not json") is None
-    assert dispatch._markup([[{"oops": 1}]]) is None
+def test_the_chat_has_no_buttons_at_all():
+    """Keyboards go stale the moment the sweep moves on, and can't be
+    typed. Everything is a command, so nothing builds a markup."""
+    from unisweep_bot import dispatch, handlers
+    import inspect
+    for module in (dispatch, handlers):
+        source = inspect.getsource(module)
+        assert "InlineKeyboard" not in source, module.__name__
+        assert "reply_markup" not in source, module.__name__
+    assert not hasattr(handlers, "on_button")
 
 
-def test_callback_data_fits_telegram_limit():
+def test_parameter_names_can_be_typed_the_lazy_way():
+    from unisweep_bot.handlers import _pick_read
+    reads = ["LOCKIN.X", "LOCKIN.Y", "SMU.Curr"]
+    assert _pick_read(reads, "", "") == "LOCKIN.X"        # first by default
+    assert _pick_read(reads, "", "SMU.Curr") == "SMU.Curr"  # or last chosen
+    assert _pick_read(reads, "lockin.y", "") == "LOCKIN.Y"  # any case
+    assert _pick_read(reads, "curr", "") == "SMU.Curr"      # part of it
+    assert _pick_read(reads, "2", "") == "LOCKIN.Y"         # or its number
+    assert _pick_read(reads, "lockin", "") is None          # ambiguous
+    assert _pick_read(reads, "nope", "") is None
+    assert _pick_read([], "", "") is None
+
+
+def test_alert_names_are_words_people_would_pick():
+    for word, key in (("errors", "error"), ("error", "error"),
+                      ("ends", "finished"), ("done", "finished"),
+                      ("safety", "guard"), ("quiet", "silent"),
+                      ("picture", "photo"), ("progress", "progress")):
+        assert fmt.pref_key(word) == key, word
+    assert fmt.pref_key("banana") == ""
+    # every switch /alerts prints can be named back to its key
+    for key in fmt.KIND_LABEL:
+        assert fmt.pref_key(key) == key, key
+
+
+def test_stopping_a_sweep_takes_two_goes():
     from unisweep_bot import handlers
-    rig_id = "f" * 32                        # a uuid4 hex rig id
-    for data in (f"rig:{rig_id}", f"unlinkok:{rig_id}",
-                 "pref:progress_min", "cmap:coolwarm", "map:23",
-                 "ctlok:to_zero", "fresh:table", "menu:home"):
-        assert len(data.encode()) <= 64, data
-    assert handlers.CONTROL_LABEL["stop"]
+    handlers._PENDING.clear()
+    assert not handlers._confirmed(7, "stop")     # first ask: just warns
+    assert handlers._confirmed(7, "stop")         # second: go ahead
+    assert not handlers._confirmed(7, "stop")     # and it is spent
+    assert not handlers._confirmed(8, "stop")     # per chat, not global
+    handlers._PENDING.clear()
 
 
 # --------------------------------------------------------------- pairing --

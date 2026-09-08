@@ -55,11 +55,21 @@ DEFAULT_CMAP = "viridis"
 CMAPS = ["viridis", "plasma", "inferno", "magma", "cividis", "coolwarm",
          "Greys", "jet"]
 
-DPI = 150
+#: Sized for a phone, not a paper.  Telegram shows a photo about 800 px
+#: wide, so rendering larger costs bytes and buys nothing; the type sizes
+#: below are chosen against *this* pixel count, not scaled down from a
+#: print figure.
+DPI = 100
+
+#: Palette depth used when re-encoding (see :func:`_png`).  Line art is a
+#: handful of flat colours and survives 48; a colormapped surface needs
+#: more steps before banding shows on a smooth gradient.
+COLORS_LINE = 48
+COLORS_MAP = 192
 
 
 # ---------------------------------------------------------------- style --
-def _new_figure(width=7.2, height=4.3):
+def _new_figure(width=8.0, height=4.6):
     fig = Figure(figsize=(width, height), dpi=DPI, facecolor=SURFACE)
     ax = fig.add_subplot(111)
     ax.set_facecolor(SURFACE)
@@ -68,7 +78,7 @@ def _new_figure(width=7.2, height=4.3):
     for side in ("left", "bottom"):
         ax.spines[side].set_color(GRID)
         ax.spines[side].set_linewidth(1.0)
-    ax.tick_params(colors=INK_2, labelsize=9, length=3, width=1.0)
+    ax.tick_params(colors=INK_2, labelsize=11, length=3, width=1.0)
     ax.grid(True, color=GRID, linewidth=0.7, alpha=0.9)
     ax.set_axisbelow(True)
     return fig, ax
@@ -91,17 +101,45 @@ def _titles(ax, title: str, subtitle: str = "") -> None:
     scientific-notation offset (``×10⁻⁶``) also lives just above the
     top-left corner, and a subtitle drawn there lands on top of it.
     """
-    ax.set_title(title, color=INK, fontsize=12, loc="left", pad=12)
+    ax.set_title(title, color=INK, fontsize=14, loc="left", pad=12)
     if subtitle:
-        ax.set_title(subtitle, color=INK_2, fontsize=9, loc="right", pad=12)
+        ax.set_title(subtitle, color=INK_2, fontsize=11, loc="right", pad=12)
 
 
-def _png(fig) -> bytes:
+def _png(fig, colors: int = COLORS_LINE) -> bytes:
+    """Encode the figure as a small PNG.
+
+    A plot is flat colour over a flat background — a handful of distinct
+    values, not a photograph — so reducing the palette costs nothing
+    visible and roughly quarters the file.  It stays PNG rather than
+    becoming JPEG on purpose: JPEG puts ringing around thin lines and
+    small text, which is most of what these pictures are.
+
+    The octree method rather than median cut, which matters more than it
+    sounds: median cut spends the whole palette on whatever dominates the
+    frame, so on a map filled with a colour ramp the black title text
+    lands on the nearest *green*, and the heading comes out speckled.
+    Octree keeps the extremes and, here, also encodes smaller.
+
+    Pillow ships with matplotlib, but if it is somehow missing the plain
+    PNG goes out unchanged rather than nothing going out at all.
+    """
     buf = io.BytesIO()
     FigureCanvasAgg(fig)
     fig.savefig(buf, format="png", facecolor=SURFACE,
-                bbox_inches="tight", pad_inches=0.25)
-    return buf.getvalue()
+                bbox_inches="tight", pad_inches=0.22)
+    raw = buf.getvalue()
+    try:
+        from PIL import Image
+        image = Image.open(io.BytesIO(raw)).convert("RGB")
+        small = image.quantize(colors=colors, method=Image.FASTOCTREE)
+        out = io.BytesIO()
+        small.save(out, format="PNG", optimize=True)
+        packed = out.getvalue()
+        return packed if len(packed) < len(raw) else raw
+    except Exception as exc:                           # noqa: BLE001
+        logger.debug("palette encoding skipped: %s", exc)
+        return raw
 
 
 def _clean(values) -> np.ndarray:
@@ -150,12 +188,12 @@ def render_trace(trace: dict, reads: Sequence[str], title: str,
         return None
 
     ax.set_xlabel(trace.get("x_label") or "fast axis", color=INK_2,
-                  fontsize=10)
+                  fontsize=11)
     if drawn == 1:
-        ax.set_ylabel(wanted[0], color=INK_2, fontsize=10)
+        ax.set_ylabel(wanted[0], color=INK_2, fontsize=11)
     else:
-        ax.set_ylabel("value", color=INK_2, fontsize=10)
-        leg = ax.legend(loc="best", frameon=False, fontsize=9,
+        ax.set_ylabel("value", color=INK_2, fontsize=11)
+        leg = ax.legend(loc="best", frameon=False, fontsize=11,
                         labelcolor=INK_2)
         for text in leg.get_texts():
             text.set_color(INK_2)
@@ -194,7 +232,7 @@ def render_map(map_obj: dict, read: str, title: str, subtitle: str = "",
     if not np.isfinite(z).any():
         return None
 
-    fig, ax = _new_figure(width=7.2, height=4.8)
+    fig, ax = _new_figure(width=8.0, height=5.0)
     ax.grid(False)
     if cmap not in CMAPS:
         cmap = DEFAULT_CMAP
@@ -209,17 +247,17 @@ def render_map(map_obj: dict, read: str, title: str, subtitle: str = "",
     mesh = ax.pcolormesh(grid, rows, masked, cmap=cmap, shading="nearest",
                          vmin=vmin, vmax=vmax)
     bar = fig.colorbar(mesh, ax=ax, pad=0.02)
-    bar.set_label(read, color=INK_2, fontsize=10)
-    bar.ax.tick_params(colors=INK_2, labelsize=9)
+    bar.set_label(read, color=INK_2, fontsize=11)
+    bar.ax.tick_params(colors=INK_2, labelsize=10)
     bar.outline.set_edgecolor(GRID)
 
     ax.set_xlabel(map_obj.get("x_label") or "fast axis", color=INK_2,
-                  fontsize=10)
+                  fontsize=11)
     ax.set_ylabel(map_obj.get("y_label") or "slow axis", color=INK_2,
-                  fontsize=10)
+                  fontsize=11)
     _sci(ax)
     _titles(ax, title or read, subtitle)
-    return _png(fig)
+    return _png(fig, COLORS_MAP)
 
 
 # ------------------------------------------------------- what to render --

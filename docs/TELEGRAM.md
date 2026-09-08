@@ -31,27 +31,37 @@ answers about whichever one is selected.
 setups apart in the chat, so a second "ATTODRY" is refused and the Settings
 page says so; give it a different name and try again.
 
-Everything else lives in the chat:
+Everything else lives in the chat. There are no buttons — buttons go stale
+the moment the sweep moves on, and cannot be typed:
 
 ```
-/menu      everything, with buttons
-/status    state, progress, ETA, the latest readings
-/table     the tail of the data table
-/plot      a parameter against the fast axis, as a picture
-/map       a parameter over the 2-D grid, as a picture
-/stats     min / max / mean per parameter
-/rigs      switch between the setups you are linked to
-/notify    choose what I am told about
-/control   pause / stop  (only if this setup allows it)
-/unlink    stop receiving anything from this setup
+/status    how the sweep is going
+/data      the latest numbers
+/line      line scan of one parameter
+/map       2-D map of one parameter
+/stats     smallest, largest, average
+/setups    your setups, and which one it answers about
+/alerts    what it messages you about
+/unlink    stop messages from this setup
+/help      the list above
 ```
+
+None of them needs an argument. `/line` draws whatever you looked at last;
+`/line lockin.y`, `/line curr` or `/line 2` picks another one — any case,
+part of the name, or its position in the list.
+
+`/alerts` on its own shows what is on. `/alerts errors off` changes one,
+`/alerts progress 30` asks for an update every half hour.
+
+With remote control allowed there is also `/pause`, `/resume`, `/stop` and
+`/zero`. Stopping asks twice: send the same command again within a minute.
 
 ### Unbinding, from either side
 
 * **In Unisweep** — select the person in **Linked Telegram users** and press
   **Remove**. The bot stops sending them anything about this setup at once
   and tells them so.
-* **In Telegram** — `/unlink`.
+* **In Telegram** — `/unlink`, twice.
 
 Either way the database is what changes, so both sides agree immediately.
 The list in Unisweep refreshes on every heartbeat; **Update info** asks
@@ -84,6 +94,13 @@ sweep (once a minute when idle):
 
 Plots are drawn on the server from that copy, which is why asking for a
 different parameter is instant and costs the measurement computer nothing.
+They come back at about 15 kB — sized for a phone and palette-reduced —
+so asking for one costs you nothing either.
+
+The sweep-ended message is **text**. A picture is thousands of times the
+bytes of the sentence you actually read, so it is not attached by default;
+`/alerts picture on` turns it on for anyone who wants one every time, and
+`/line` or `/map` is always one message away.
 
 Not sent: your data files, the raw full-resolution data, or instrument
 addresses. And nothing is *delivered* to anybody until they hold a code —
