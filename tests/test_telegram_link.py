@@ -20,7 +20,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from unisweep.core import events as ev                          # noqa: E402
 from unisweep.core.livedata import LiveData, LiveMaps           # noqa: E402
 from unisweep.core.telegram_link import (                       # noqa: E402
-    TelegramLink, _basename, _decimate, _num, new_rig_identity)
+    DEFAULT_SERVICE_URL, TelegramLink, _basename, _decimate, _num,
+    new_rig_identity, service_url)
 
 
 class _Resp(io.BytesIO):
@@ -95,6 +96,42 @@ def test_basename_handles_both_separators():
     assert _basename(r"C:\data\260817-2.csv") == "260817-2.csv"
     assert _basename("/home/lab/260817-2.csv") == "260817-2.csv"
     assert _basename("") == ""
+
+
+def test_the_service_address_is_compiled_in():
+    """Every installation must reach the group's bot with no setting up.
+
+    The address is public — it is a website, and nothing behind it opens
+    without a rig token — so keeping it in source is what makes "already
+    configured" possible.
+    """
+    assert DEFAULT_SERVICE_URL.startswith("https://"), DEFAULT_SERVICE_URL
+    assert service_url("") == DEFAULT_SERVICE_URL
+    assert service_url("https://mine.example/") == "https://mine.example"
+    import os
+    os.environ["UNISWEEP_BOT_URL"] = "https://env.example"
+    try:
+        # the environment wins, so a developer can point one machine at a
+        # private copy without editing anything
+        assert service_url("https://mine.example") == "https://env.example"
+    finally:
+        del os.environ["UNISWEEP_BOT_URL"]
+
+
+def test_a_taken_setup_name_is_reported_not_retried():
+    link = _link()
+    server = _Server(fail=False)
+
+    def refuse(request, timeout=None):
+        server(request, timeout)
+        raise urllib.error.HTTPError(
+            request.full_url, 409, "Conflict", {},
+            io.BytesIO(json.dumps({"error": "name_taken"}).encode()))
+
+    _patched(refuse, link._hello)          # must not raise into the loop
+    assert link.link_status == "error"
+    assert "different name" in link.last_error
+    assert "ATTODRY" in link.last_error
 
 
 def test_rig_identity_is_unique_and_long():

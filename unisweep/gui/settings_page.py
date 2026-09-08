@@ -1,11 +1,15 @@
 """Settings page.
 
-Everything that is not the definition of a particular sweep or set/get
-action lives here: data-output choices (map worksheets vs the single XYZ
-long file, interpolation, uniform grid, PNG mirrors), sweep-behaviour
-defaults (to-zero on finish), the sweepable stall-watchdog budgets, and the
-driver-repository configuration. Changes save immediately and apply to the
-next sweep.
+What belongs here is what a person changes rarely and deliberately:
+appearance, where map data goes, who gets told about a sweep, the
+assistant endpoint, the lab profile and the driver repository. Changes
+save immediately and apply to the next sweep.
+
+Engine tuning that has a sane default and a real cost to getting wrong —
+the to-zero default, the auto-connect flag, the stall-watchdog budgets —
+is deliberately *not* on this page. It still exists in
+``config/settings.json`` and still applies; it is simply not something to
+scroll past on the way to something else.
 """
 
 from __future__ import annotations
@@ -112,86 +116,20 @@ class SettingsPage(ttk.Frame):
         cb.grid(row=4, column=0, sticky="w", pady=2, columnspan=3,
                 padx=(16, 0))
 
-        # ---------------- sweep behaviour ------------------------------
-        beh = Card(self, title="Sweep behaviour")
-        beh.pack(fill="x", padx=10, pady=4)
-        body = ttk.Frame(beh, style="Card.TFrame")
-        body.grid(row=1, column=0, sticky="ew", pady=(4, 2))
-        self.v_autoconn = tk.BooleanVar(value=st.connect_on_start)
-        ttk.Checkbutton(body, text="Connect all assigned instruments "
-                                   "at start",
-                        variable=self.v_autoconn,
-                        command=self._changed).grid(
-            row=90, column=0, columnspan=3, sticky="w", pady=2)
-        self.v_tozero = tk.BooleanVar(value=st.to_zero_default)
-        ttk.Checkbutton(body, text="Ramp all axes to zero when a sweep "
-                                   "finishes",
-                        variable=self.v_tozero,
-                        command=self._changed).grid(row=0, column=0,
-                                                    sticky="w", pady=2)
-
-        ttk.Label(body, text="Sweepable stall watchdog:  warn after",
-                  style="MutedS.TLabel").grid(row=1, column=0, sticky="w",
-                                              pady=2)
-        self.e_warn = ValidatedEntry(body, st.stall_warn_s, width=6)
-        self.e_warn.grid(row=1, column=1, sticky="w", padx=4)
-        ttk.Label(body, text="s, abort after",
-                  style="MutedS.TLabel").grid(row=1, column=2, sticky="w")
-        self.e_abort = ValidatedEntry(body, st.stall_abort_s, width=6)
-        self.e_abort.grid(row=1, column=3, sticky="w", padx=4)
-        ttk.Label(body, text="s of no readback progress",
-                  style="MutedS.TLabel").grid(row=1, column=4, sticky="w")
-        for e in (self.e_warn, self.e_abort):
-            e.bind("<FocusOut>", lambda _e: self._changed())
-            e.bind("<Return>", lambda _e: self._changed())
-
         # ---------------- notifications ---------------------------------
-        # Two shapes of the same idea.  The default asks for a chat id and
-        # nothing else: the bot runs on the group's own server, so *what*
-        # to be told, the data table and the plots are all arranged in
-        # Telegram instead of being duplicated on this page.
-        noti = Card(self, title="Notifications (Telegram)")
+        # One bot serves the whole group and every installation is built
+        # knowing where it is, so there is no address to type and nothing
+        # to switch on.  What is left is the two things a person actually
+        # does: hand out a code, and see (or revoke) who holds one.
+        noti = Card(self, title="Telegram notifications")
         noti.pack(fill="x", padx=10, pady=4)
         nbody = ttk.Frame(noti, style="Card.TFrame")
         nbody.grid(row=1, column=0, sticky="ew", pady=(4, 2))
 
-        self.v_tg_mode = tk.StringVar(value=st.tg_mode)
-        modes = ttk.Frame(nbody, style="Card.TFrame")
-        modes.grid(row=0, column=0, columnspan=5, sticky="w")
-        for col, (value, text, tip) in enumerate((
-                ("service", "Unisweep bot  (recommended)",
-                 "The lab's own bot, running on the group's server.\n"
-                 "Give it your chat id once; after that you choose what\n"
-                 "it tells you — and ask it for the data table, line\n"
-                 "plots and maps — inside Telegram.\n"
-                 "It also notices when this computer stops reporting,\n"
-                 "which is the one failure a notifier running here\n"
-                 "could never tell you about."),
-                ("bot", "My own bot",
-                 "A private bot you made with @BotFather. Sends one\n"
-                 "message when a sweep ends: no server, no data, no\n"
-                 "plots. The token is stored locally in\n"
-                 "config/settings.json."))):
-            rb = ttk.Radiobutton(modes, text=text, value=value,
-                                 variable=self.v_tg_mode,
-                                 command=self._tg_mode_changed)
-            rb.grid(row=0, column=col, sticky="w", padx=(0, 18))
-            Tooltip(rb, tip)
-
         # ---- the default: a link, a code, and a list of people ---------
         self.tg_service = ttk.Frame(nbody, style="Card.TFrame")
+        self.tg_service.grid(row=1, column=0, columnspan=4, sticky="ew")
         srv = self.tg_service
-        self.v_tg_service_on = tk.BooleanVar(value=st.tg_enabled)
-        cb_on = ttk.Checkbutton(
-            srv, text="Report this setup to the Unisweep bot",
-            variable=self.v_tg_service_on, command=self._tg_service_toggled)
-        cb_on.grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 4))
-        Tooltip(cb_on, "While this is on, Unisweep sends the bot what the\n"
-                       "sweep is doing — progress, the latest readings and a\n"
-                       "decimated copy of the current data — so the people\n"
-                       "linked below can be told about it and can ask for\n"
-                       "plots. Nothing is sent to anyone who is not listed.")
-
         bar = ttk.Frame(srv, style="Card.TFrame")
         bar.grid(row=1, column=0, columnspan=4, sticky="w")
         ttk.Label(bar, text="Bot", style="MutedS.TLabel").grid(
@@ -250,8 +188,12 @@ class SettingsPage(ttk.Frame):
                 "The bot stops sending that person anything about this\n"
                 "setup immediately, and tells them it happened. They can\n"
                 "link again with a new code.")
-        self.tg_refresh_btn = ttk.Button(ubar, text="Refresh",
+        self.tg_refresh_btn = ttk.Button(ubar, text="Update info",
                                          command=self._tg_refresh_users)
+        Tooltip(self.tg_refresh_btn,
+                "Ask the service who is linked right now. The list also\n"
+                "refreshes on its own with every heartbeat, so this is\n"
+                "for when you have just added or removed somebody.")
         self.tg_refresh_btn.pack(side="left", padx=8)
 
         self.v_tg_control = tk.BooleanVar(value=st.tg_allow_control)
@@ -269,60 +211,6 @@ class SettingsPage(ttk.Frame):
                                         justify="left", wraplength=660)
         self.tg_link_status.grid(row=8, column=0, columnspan=4, sticky="w",
                                  pady=(4, 0))
-
-        adv = ttk.Frame(srv, style="Card.TFrame")
-        adv.grid(row=9, column=0, columnspan=4, sticky="w", pady=(6, 0))
-        ttk.Label(adv, text="Service address", style="MutedS.TLabel").grid(
-            row=0, column=0, sticky="w")
-        self.e_service = ValidatedEntry(
-            adv, st.tg_service_url or self._default_service_url(),
-            validator=str, allow_empty=True, width=44)
-        self.e_service.grid(row=0, column=1, sticky="w", padx=4)
-        Tooltip(self.e_service,
-                "Where the group's bot is deployed, e.g.\n"
-                "https://unisweep-bot.up.railway.app\n"
-                "Set once per lab; normally already filled in.")
-
-        # ---- the private-bot fallback ----------------------------------
-        self.tg_own = ttk.Frame(nbody, style="Card.TFrame")
-        own = self.tg_own
-        self.v_tg = tk.BooleanVar(value=st.tg_enabled)
-        cb = ttk.Checkbutton(own, text="Send a Telegram message when a "
-                                       "sweep ends",
-                             variable=self.v_tg, command=self._changed)
-        cb.grid(row=0, column=0, columnspan=4, sticky="w", pady=2)
-        Tooltip(cb, "Create a bot with @BotFather to get the token; get\n"
-                    "your chat id from @userinfobot (send it any message).\n"
-                    "The token is stored locally in config/settings.json.")
-        ttk.Label(own, text="Bot token", style="MutedS.TLabel").grid(
-            row=1, column=0, sticky="w", pady=2)
-        self.e_token = ValidatedEntry(own, st.tg_token, validator=str,
-                                      allow_empty=True, width=46)
-        self.e_token.grid(row=1, column=1, columnspan=3, sticky="w", padx=4)
-        ttk.Label(own, text="Chat id", style="MutedS.TLabel").grid(
-            row=2, column=0, sticky="w", pady=2)
-        self.e_chat = ValidatedEntry(own, st.tg_chat_id, validator=str,
-                                     allow_empty=True, width=18)
-        self.e_chat.grid(row=2, column=1, sticky="w", padx=4)
-        self.v_tg_err = tk.BooleanVar(value=st.tg_on_error)
-        ttk.Checkbutton(own, text="also when a sweep stops on an error",
-                        variable=self.v_tg_err,
-                        command=self._changed).grid(row=2, column=2,
-                                                    columnspan=2,
-                                                    sticky="w", padx=(14, 0))
-        self.tg_test_btn = ttk.Button(own, text="Send test message",
-                                      command=self._tg_test)
-        self.tg_test_btn.grid(row=3, column=1, sticky="w", padx=4,
-                              pady=(6, 2))
-        self.tg_status = ttk.Label(own, text="", style="MutedS.TLabel")
-        self.tg_status.grid(row=3, column=2, columnspan=2, sticky="w",
-                            padx=8)
-        for e in (self.e_token, self.e_chat, self.e_rig_name,
-                  self.e_service):
-            e.bind("<FocusOut>", lambda _e: self._changed())
-            e.bind("<Return>", lambda _e: self._changed())
-        self._show_tg_mode()
-        self.refresh_telegram_status()
 
         # ---------------- assistant endpoint ----------------------------
         agent = Card(self, title="Assistant endpoint (MCP)")
@@ -504,33 +392,11 @@ class SettingsPage(ttk.Frame):
             ctl.flag("settings.map_images", self.v_images, page=page,
                      label="Keep PNG (and 3-D GIF) map mirrors",
                      after_set=changed),
-            ctl.flag("settings.connect_on_start", self.v_autoconn, page=page,
-                     label="Open all assigned instruments at launch",
-                     after_set=changed),
-            ctl.flag("settings.to_zero_default", self.v_tozero, page=page,
-                     label="Ramp to zero when a sweep ends",
-                     after_set=changed),
-            ctl.number("settings.stall_warn_s", self.e_warn, page=page,
-                       unit="s", label="Stall watchdog: warn after",
-                       after_set=changed),
-            ctl.number("settings.stall_abort_s", self.e_abort, page=page,
-                       unit="s", label="Stall watchdog: abort after",
-                       after_set=changed),
-            ctl.option_var("settings.telegram_mode", self.v_tg_mode,
-                           ("service", "bot"), page=page,
-                           label="Telegram notification mode",
-                           after_set=self._tg_mode_changed,
-                           help="service = the lab's shared Unisweep bot "
-                                "(chat id only); bot = a private "
-                                "@BotFather token, sweep-end message only."),
-            ctl.flag("settings.telegram_reporting", self.v_tg_service_on,
-                     page=page, after_set=self._tg_service_toggled,
-                     label="Report this setup to the Unisweep bot"),
             ctl.entry_text("settings.telegram_rig_name", self.e_rig_name,
                            page=page,
-                           label="Name this setup shows in Telegram"),
-            ctl.entry_text("settings.telegram_service_url", self.e_service,
-                           page=page, label="Telegram service address"),
+                           label="Name this setup shows in Telegram",
+                           help="Must be unique across the lab — it is how "
+                                "people tell setups apart in the chat."),
             ctl.flag("settings.telegram_allow_control", self.v_tg_control,
                      page=page, after_set=changed,
                      label="Allow pause/stop from Telegram"),
@@ -539,26 +405,14 @@ class SettingsPage(ttk.Frame):
                        label="Generate a Telegram pairing code",
                        help="Shows six digits; whoever sends them to the "
                             "bot is linked to this setup."),
+            ctl.action("settings.telegram_update", self.tg_refresh_btn,
+                       page=page, label="Update the linked-user list"),
             ctl.readout("settings.telegram_link",
                         self.app.telegram_summary, page=page,
                         label="Telegram link status"),
             ctl.readout("settings.telegram_users",
                         self.app.telegram_users_summary, page=page,
                         label="Linked Telegram users"),
-            ctl.flag("settings.telegram_enabled", self.v_tg, page=page,
-                     label="Telegram notifications (own bot)",
-                     after_set=changed),
-            ctl.entry_text("settings.telegram_token", self.e_token,
-                           page=page, label="Telegram bot token"),
-            ctl.entry_text("settings.telegram_chat_id", self.e_chat,
-                           page=page, label="Telegram chat id (own bot)"),
-            ctl.flag("settings.telegram_on_error", self.v_tg_err, page=page,
-                     label="Telegram on errors too", after_set=changed),
-            ctl.action("settings.telegram_test", self.tg_test_btn,
-                       page=page, label="Send a test Telegram message"),
-            ctl.readout("settings.telegram_status",
-                        lambda: self.tg_status.cget("text"), page=page,
-                        label="Telegram status"),
             ctl.flag("settings.agent_enabled", self.v_agent, page=page,
                      label="Serve the assistant endpoint",
                      after_set=self._agent_changed),
@@ -592,28 +446,6 @@ class SettingsPage(ttk.Frame):
         ]
 
     # ---------------- telegram ----------------------------------------
-    @staticmethod
-    def _default_service_url() -> str:
-        from ..core.telegram_link import DEFAULT_SERVICE_URL
-        return DEFAULT_SERVICE_URL
-
-    def _show_tg_mode(self):
-        """Only one of the two sub-panels is ever on screen."""
-        service = self.v_tg_mode.get() == "service"
-        self.tg_service.grid_forget()
-        self.tg_own.grid_forget()
-        target = self.tg_service if service else self.tg_own
-        target.grid(row=1, column=0, columnspan=5, sticky="ew", pady=(6, 0))
-
-    def _tg_mode_changed(self):
-        self._show_tg_mode()
-        if self.v_tg_mode.get() != "service":
-            self.app.stop_telegram_link()
-        self._changed()
-        if self.v_tg_mode.get() == "service" and self.v_tg_service_on.get():
-            self.app.start_telegram_link()
-        self.refresh_telegram_status()
-
     def _tg_help(self):
         """The pop-up behind the '?' — how the whole thing works."""
         win = tk.Toplevel(self.app.root)
@@ -672,35 +504,24 @@ class SettingsPage(ttk.Frame):
             pass
 
     # -----------------------------------------------------------------
-    def _tg_service_toggled(self):
-        """The one switch: report to the bot, or don't."""
-        self._changed()
-        if self.v_tg_service_on.get():
-            if not (self.e_service.value() or "").strip():
-                self.v_tg_service_on.set(False)
-                self._changed()
-                messagebox.showinfo(
-                    "Telegram",
-                    "This lab has no bot address configured yet. Put the "
-                    "address of your group's Unisweep bot service into "
-                    "'Service address' (see server/README.md), or use "
-                    "'My own bot' instead.")
-                return
-            self.app.start_telegram_link()
-        else:
-            self.app.stop_telegram_link()
-        self.refresh_telegram_status()
-
     def _bot_url(self) -> str:
+        """The bot's Telegram address, as the service reported it.
+
+        Never hard-coded here: the service knows its own @name (it asks
+        Telegram at start-up) and hands it back on every heartbeat, so
+        renaming the bot cannot leave stale links in the software.
+        """
         return getattr(self.app.tg_link, "bot_link", "") or ""
 
     def _tg_open_bot(self):
         url = self._bot_url()
         if not url:
-            messagebox.showinfo("Telegram",
-                                "The bot's address is not known yet — switch "
-                                "reporting on and give it a moment to reach "
-                                "the service.")
+            messagebox.showinfo(
+                "Telegram",
+                "The bot's address is not known yet — this setup has not "
+                "reached the service. Press 'Update info'; if it stays "
+                "unknown, the notification service is down or this "
+                "computer has no route to it.")
             return
         import webbrowser
         webbrowser.open(url)
@@ -720,16 +541,17 @@ class SettingsPage(ttk.Frame):
     def _tg_generate_code(self):
         """Ask the service for a pairing code and put it on screen."""
         self._changed()
-        if not self.v_tg_service_on.get():
-            self.v_tg_service_on.set(True)
-            self._tg_service_toggled()
         try:
             issued = self.app.telegram_pairing_code()
         except Exception as exc:                       # noqa: BLE001
+            detail = str(exc)
+            if "name_taken" in detail:
+                detail = (f"another setup in the lab is already called "
+                          f"'{self.e_rig_name.value() or ''}'. Give this one "
+                          f"a different name and try again.")
             messagebox.showwarning(
-                "Telegram",
-                f"Could not get a pairing code:\n\n{exc}\n\n"
-                f"Check the service address and this computer's network.")
+                "Telegram", f"Could not get a pairing code:\n\n{detail}")
+            self.refresh_telegram_status()
             return
         self._show_code_window(issued)
 
@@ -852,22 +674,6 @@ class SettingsPage(ttk.Frame):
         except Exception:                              # noqa: BLE001
             pass
 
-    # -----------------------------------------------------------------
-    def _tg_test(self):
-        from ..core.notify import TelegramNotifier
-        self._changed()
-        st = self.app.settings
-        notifier = TelegramNotifier(st.tg_token, st.tg_chat_id)
-        if not notifier.configured:
-            self.tg_status.configure(text="enter a token and a chat id "
-                                          "first")
-            return
-        self.tg_status.configure(text="sending…")
-        notifier.send_async(
-            "Unisweep: test message — notifications are working.",
-            done=lambda ok, d: self.app.event_queue.put(
-                ("notify_result", d)))
-
     def _theme_changed(self):
         self.app.set_theme(self.v_theme.get())
 
@@ -878,26 +684,9 @@ class SettingsPage(ttk.Frame):
         st.map_interpolated = self.v_interp.get()
         st.map_uniform = self.v_uniform.get()
         st.map_images = self.v_images.get()
-        st.to_zero_default = self.v_tozero.get()
-        st.connect_on_start = self.v_autoconn.get()
         st.plots_on_top = self.v_ontop.get()
-        st.tg_mode = self.v_tg_mode.get()
-        # one enable flag, two panels: whichever mode is showing owns it,
-        # so there is never a state where both halves think they are on
-        st.tg_enabled = (self.v_tg_service_on.get()
-                         if st.tg_mode == "service" else self.v_tg.get())
-        st.tg_on_error = self.v_tg_err.get()
-        st.tg_token = (self.e_token.value() or "").strip()
-        st.tg_chat_id = (self.e_chat.value() or "").strip()
-        st.tg_service_url = (self.e_service.value() or "").strip().rstrip("/")
         st.tg_rig_name = (self.e_rig_name.value() or "").strip()
         st.tg_allow_control = self.v_tg_control.get()
-        warn = self.e_warn.value()
-        abort = self.e_abort.value()
-        if warn is not None and warn > 0:
-            st.stall_warn_s = float(warn)
-        if abort is not None and abort > st.stall_warn_s:
-            st.stall_abort_s = float(abort)
         st.save(self.app.core_dir)
         self.app.apply_settings()
 

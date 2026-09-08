@@ -26,10 +26,8 @@ from ..agent.tap import EventTap
 from ..core.labprofile import LabProfile
 from ..core.limits import LimitPolicy
 from ..core.livedata import LiveData, LiveMaps
-from ..core.notify import TelegramNotifier, compose_sweep_message
 from ..core.settings import AppSettings
-from ..core.telegram_link import (DEFAULT_SERVICE_URL, TelegramLink,
-                                  new_rig_identity)
+from ..core.telegram_link import TelegramLink, new_rig_identity, service_url
 from .devices_page import DevicesPage
 from .plot_panel import PlotManager
 from .setget_page import SetGetPage
@@ -257,9 +255,12 @@ class App:
             self.start_agent_endpoint()
         # monitoring that has to be switched on again after every restart
         # is monitoring that will be off on the night it was needed
-        if self.settings.tg_mode == "service" and self.settings.tg_enabled:
-            self._configure_telegram()
-            self.tg_link.start()
+        # Reporting is not a thing to switch on: every installation talks
+        # to the group's bot from the moment it launches.  That is what
+        # makes the silence watchdog meaningful, and nothing reaches a
+        # person until they have paired with a code.
+        self._configure_telegram()
+        self.tg_link.start()
         from .setup_wizard import SetupWizard, setup_done
         assigned = {a: t for a, t in self.registry.types.items()
                     if a != "Time"}
@@ -333,26 +334,6 @@ class App:
         self.pages["Devices"].refresh_rows()   # LED colors re-read PALETTE
         self.settings.theme = name
         self.settings.save(self.core_dir)
-
-    def _notify_sweep_end(self, event) -> None:
-        st = self.settings
-        # In 'service' mode the sweep-end message is produced by the link
-        # (with the plot attached, and to everyone linked to this rig), so
-        # sending one from here as well would simply duplicate it.
-        if st.tg_mode != "bot" or not st.tg_enabled:
-            return
-        stopped = bool(getattr(event, "stopped", False))
-        if stopped and not st.tg_on_error and self._run_fatal:
-            return
-        text = compose_sweep_message(
-            stopped=stopped,
-            elapsed_s=getattr(self, "_run_elapsed", 0.0),
-            points=getattr(self, "_run_points", 0),
-            filename=getattr(self, "_run_file", ""),
-            detail=getattr(self, "_run_fatal", ""))
-        TelegramNotifier(st.tg_token, st.tg_chat_id).send_async(
-            text, done=lambda ok, d: self.event_queue.put(
-                ("notify_result", d)))
 
     def _restyle_map_images(self, config):
         """Feature: settings applied to a map window are applied to the
@@ -517,7 +498,7 @@ class App:
         link picks the new configuration up on its next cycle."""
         st = self.settings
         self.tg_link.configure(
-            service_url=st.tg_service_url or DEFAULT_SERVICE_URL,
+            service_url=service_url(st.tg_service_url),
             rig_id=st.tg_rig_id, rig_token=st.tg_rig_token,
             rig_name=st.tg_rig_name or self._default_rig_name(),
             allow_control=st.tg_allow_control,
@@ -532,42 +513,31 @@ class App:
             return "Unisweep"
 
     def start_telegram_link(self) -> bool:
-        """The Settings page's 'Start monitoring' button.
+        """Make sure this setup has an identity and is reporting.
 
-        The rig identity is minted here, once, and kept in
-        ``config/settings.json``: it is this installation's only credential
-        and it is what lets the service recognise the same rig again after
-        a reinstall of the bot or a restart of the database.
+        The identity is minted here, once, and kept in
+        ``config/settings.json``: it is this installation's only
+        credential, and it is what lets the service recognise the same
+        setup again after a redeploy of the bot or a restart of the
+        database.
         """
         st = self.settings
+        changed = False
         if not st.tg_rig_id or not st.tg_rig_token:
             st.tg_rig_id, st.tg_rig_token = new_rig_identity()
+            changed = True
         if not st.tg_rig_name:
             st.tg_rig_name = self._default_rig_name()
-        st.tg_mode = "service"
-        st.tg_enabled = True
-        st.save(self.core_dir)
+            changed = True
+        if changed:
+            st.save(self.core_dir)
         self._configure_telegram()
-        ok = self.tg_link.start()
-        self.status(self.telegram_summary())
-        return ok
-
-    def stop_telegram_link(self) -> None:
-        self.settings.tg_enabled = False
-        self.settings.save(self.core_dir)
-        self.tg_link.stop()
-        self.status("Telegram monitoring stopped")
+        return self.tg_link.start()
 
     def telegram_running(self) -> bool:
-        return bool(self.settings.tg_mode == "service"
-                    and self.settings.tg_enabled and self.tg_link.enabled)
+        return bool(self.tg_link.enabled)
 
     def telegram_summary(self) -> str:
-        if self.settings.tg_mode != "service":
-            return ("using a private bot — a message when a sweep ends, "
-                    "nothing else")
-        if not self.settings.tg_enabled:
-            return "not reporting"
         return self.tg_link.summary()
 
     def telegram_users_summary(self) -> str:
@@ -921,7 +891,6 @@ class App:
                 if self.engine else "")
         elif isinstance(event, ev.SweepFinished):
             self._approach_close()
-            self._notify_sweep_end(event)
             self.led.set(PALETTE["muted"] if not event.stopped
                          else PALETTE["red"])
             self.state_label.configure(

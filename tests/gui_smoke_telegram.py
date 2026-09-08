@@ -6,10 +6,10 @@ Needs a display, like ``gui_smoke.py``:
 
 It builds the real application against the mock registry and then presses
 the buttons a user presses — generate a code, look at who is linked, cut
-somebody off, switch modes — with a stub standing in for the link so no
-packet leaves the machine.  The bug class it exists for: a Settings page
-that raises the moment it is opened on a machine that has never been
-paired, and a "Remove" button that silently does nothing.
+somebody off — with a stub standing in for the link so no packet leaves
+the machine.  The bug class it exists for: a Settings page that raises the
+moment it is opened on a machine that has never been paired, and a
+"Remove" button that silently does nothing.
 """
 
 import os
@@ -118,8 +118,8 @@ def main() -> int:
             failed.append(name)
 
     def default_mode():
-        assert app.settings.tg_mode == "service", app.settings.tg_mode
-        assert page.tg_service.grid_info(), "service panel is not on screen"
+        assert page.tg_service.grid_info(), "the card is not on screen"
+        assert page.tg_bot_link.cget("text")   # placeholder until known
 
     def help_popup():
         page._tg_help()
@@ -127,13 +127,11 @@ def main() -> int:
         for win in _toplevels(app):
             win.destroy()
 
-    def switch_on():
-        app.settings.tg_service_url = "https://bot.example"
-        page.e_service.set("https://bot.example")
-        page.v_tg_service_on.set(True)
-        page._tg_service_toggled()
-        assert app.settings.tg_enabled, "reporting did not switch on"
-        assert app.tg_link.started, "the link was never started"
+    def address_is_built_in():
+        """Nobody should ever have to type the bot's address."""
+        from unisweep.core.telegram_link import service_url
+        assert service_url("").startswith("https://"), service_url("")
+        assert service_url("https://other.example") == "https://other.example"
 
     def code_window():
         page._tg_generate_code()
@@ -159,44 +157,47 @@ def main() -> int:
         assert app.tg_link.removed == [42], app.tg_link.removed
         assert _rows(page) == [], _rows(page)
 
-    def modes():
-        page.v_tg_mode.set("bot")
-        page._tg_mode_changed()
-        assert not page.tg_service.grid_info(), "service panel still shown"
-        assert page.tg_own.grid_info(), "private-bot panel not shown"
-        assert not app.tg_link.started, "reporting kept running in bot mode"
-        page.v_tg_mode.set("service")
-        page._tg_mode_changed()
-        assert page.tg_service.grid_info(), "service panel did not come back"
+    def only_the_necessary_boxes():
+        """One bot: no mode radio, no token field, no address field."""
+        for gone in ("v_tg_mode", "tg_own", "e_token", "e_service",
+                     "v_tg_service_on", "tg_start_btn"):
+            assert not hasattr(page, gone), gone
+        # and the sweep-behaviour knobs are off this page too
+        for gone in ("v_tozero", "v_autoconn", "e_warn", "e_abort"):
+            assert not hasattr(page, gone), gone
+        # what is left still works
+        assert page.tg_code_btn and page.tg_refresh_btn and page.e_rig_name
 
     def persistence():
         from unisweep.core.settings import AppSettings
-        app.settings.save(core)
-        again = AppSettings.load(core)
-        assert again.tg_mode == "service", again.tg_mode
-        assert again.tg_service_url == "https://bot.example"
-
-    def no_address():
-        """Switching reporting on without an address must explain itself
-        rather than starting a link that can never connect."""
-        page.e_service.set("")
-        page.v_tg_service_on.set(True)
-        page._tg_service_toggled()
-        assert not page.v_tg_service_on.get(), "left switched on"
-        assert _boxes and "Telegram" in _boxes[-1][1], _boxes[-1:]
-        page.e_service.set("https://bot.example")
+        page.e_rig_name.set("ATTODRY-1")
         page._changed()
+        again = AppSettings.load(core)
+        assert again.tg_rig_name == "ATTODRY-1", again.tg_rig_name
+        assert again.tg_rig_id and again.tg_rig_token, "no identity minted"
+
+    def name_clash_is_explained():
+        """A name another setup already uses is a fixable mistake, so say
+        which name and what to do, not 'HTTP 409'."""
+        def boom():
+            raise RuntimeError("HTTP 409: name_taken")
+        app.tg_link.request_code = boom
+        page.e_rig_name.set("ATTODRY-1")
+        page._tg_generate_code()
+        assert _boxes, "no warning shown"
+        assert "already called" in _boxes[-1][2], _boxes[-1]
+        assert "ATTODRY-1" in _boxes[-1][2], _boxes[-1]
 
     app.tg_link = FakeLink()
-    check("service mode is the default and is on screen", default_mode)
+    check("the notifications card is on screen", default_mode)
     check("the ? button opens the help window", help_popup)
-    check("reporting switches on", switch_on)
+    check("the bot address is built in", address_is_built_in)
     check("Generate code shows six digits", code_window)
     check("linked users and the bot link are listed", listing)
     check("Remove cuts the selected user off", removal)
-    check("switching modes shows exactly one panel", modes)
+    check("only the necessary boxes are left", only_the_necessary_boxes)
     check("settings survive a round trip through disk", persistence)
-    check("no service address is explained, not ignored", no_address)
+    check("a clashing setup name is explained", name_clash_is_explained)
 
     app.root.update_idletasks()
     print(f"\n{len(failed)} failed")

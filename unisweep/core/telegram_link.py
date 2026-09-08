@@ -50,10 +50,33 @@ from typing import Callable, Optional
 
 __all__ = ["TelegramLink", "DEFAULT_SERVICE_URL", "new_rig_identity"]
 
-#: Filled in once, after deploying ``server/`` to Railway, so that the
-#: default option in the Settings page needs nothing but a chat id.
-#: A per-installation value in ``config/settings.json`` overrides it.
-DEFAULT_SERVICE_URL = ""
+#: Where the group's bot service lives.  Set once, here, so that every
+#: Unisweep installation is configured out of the box and nobody has to
+#: type an address into the Settings page.
+#:
+#: This is deliberately in source: it is a public HTTPS endpoint, not a
+#: secret.  Nothing it serves can be reached without a rig token that the
+#: lab machine generated for itself, and the two real secrets — the
+#: Telegram bot token and the database password — live only in the
+#: server's environment variables and never leave it.  Publishing this
+#: string is exactly as safe as publishing a website address.
+DEFAULT_SERVICE_URL = "https://unisweep-bot.up.railway.app"
+
+#: Overrides for people running their own copy, in this order:
+#: ``UNISWEEP_BOT_URL`` in the environment, then ``tg_service_url`` in
+#: ``config/settings.json``, then the constant above.
+SERVICE_URL_ENV = "UNISWEEP_BOT_URL"
+
+
+def service_url(configured: str = "") -> str:
+    """The address this installation should talk to."""
+    import os
+    for candidate in (os.getenv(SERVICE_URL_ENV, ""), configured,
+                      DEFAULT_SERVICE_URL):
+        candidate = (candidate or "").strip().rstrip("/")
+        if candidate:
+            return candidate
+    return ""
 
 _API_HELLO = "/api/v1/hello"
 _API_PAIR = "/api/v1/pair"
@@ -386,10 +409,15 @@ class TelegramLink:
     def _run(self) -> None:
         failures = 0
         next_push = 0.0
+        next_hello = 0.0
         while not self._stop.is_set():
             now = time.time()
             try:
-                if self.link_status in ("connecting", "error"):
+                if self.link_status in ("connecting", "error") \
+                        and now >= next_hello:
+                    # a rejected name (or any other refusal) must not turn
+                    # into a request every couple of seconds
+                    next_hello = now + 30.0
                     self._hello()
                 if self.link_status == "active" and now >= next_push:
                     self._push()
@@ -449,7 +477,20 @@ class TelegramLink:
             payload = {"rig_id": self.rig_id, "rig_token": self.rig_token,
                        "name": self.rig_name,
                        "allow_control": self.allow_control, "version": 1}
-        reply = self._post(_API_HELLO, payload)
+        try:
+            reply = self._post(_API_HELLO, payload)
+        except RuntimeError as exc:
+            if "name_taken" in str(exc):
+                # Not a transient failure: retrying cannot fix it, so say
+                # what to do instead of backing off forever.
+                with self._lock:
+                    self.link_status = "error"
+                    self.last_error = (
+                        f"another setup is already called "
+                        f"'{self.rig_name}' — give this one a different name")
+                self._status(self.summary())
+                return
+            raise
         with self._lock:
             self.last_error = ""
             self.link_status = "active"

@@ -71,12 +71,29 @@ so asking for a different parameter costs the measurement computer nothing.
    DEFAULT_SERVICE_URL = "https://<your service>.up.railway.app"
    ```
 
-   so every machine in the group is configured out of the box. A
-   per-machine override lives in the Settings page (*Service address*) and
-   in `config/settings.json`.
+   That one line is what makes every installation in the group work out of
+   the box — there is no address field in the software. Committing it is
+   safe and intended: it is a public HTTPS endpoint, and nothing behind it
+   opens without a rig token that each lab machine generated for itself.
+   The two real secrets stay in Railway's variables. For a private copy,
+   `UNISWEEP_BOT_URL` in the environment overrides it.
 
 Health check: `GET /healthz` returns `{"ok": true, ...}` and is what
 Railway watches.
+
+### If every request comes back 502
+
+A 502 in a few milliseconds is Railway's router failing to reach the
+container — the app is fine, the port is wrong. The start-up log says
+which port it bound:
+
+```
+ingest API listening on 0.0.0.0:8080
+```
+
+Make Railway's domain point at that number: **Settings → Networking →**
+the domain **→ target port**. Setting a `PORT` variable and redeploying
+works too — the service binds whatever `PORT` says, and falls back to 8080.
 
 ### Cost and scale
 
@@ -94,6 +111,12 @@ There is no chat id to look up and nothing to type on the lab computer:
 
 1. In Unisweep: **Settings → Notifications → Generate code**.
 2. Send the six digits to the bot.
+
+Setup names must be unique across the service — they are how people tell
+setups apart in the chat — so a second setup calling itself "ATTODRY" is
+refused with `409 name_taken` and the Settings page explains it. One
+person may be linked to any number of setups and switches between them
+with `/rigs`.
 
 The code is valid for ten minutes, can be spent once, and is replaced
 whenever a new one is generated. That is the whole authentication —

@@ -188,6 +188,16 @@ CREATE TABLE IF NOT EXISTS chats (
 """
 
 
+#: Applied separately and tolerated if it fails.  A database that already
+#: holds two setups with the same name must not stop the service from
+#: starting — the explicit check in :func:`rig_name_owner` still prevents
+#: new collisions, and this index only makes the race impossible.
+INDEXES = [
+    "CREATE UNIQUE INDEX IF NOT EXISTS rigs_name_key "
+    "ON rigs (lower(name)) WHERE name <> ''",
+]
+
+
 def initialize_database() -> bool:
     """Create the schema, retrying while the database wakes up.
 
@@ -200,13 +210,21 @@ def initialize_database() -> bool:
             with _cursor(commit=True) as cur:
                 cur.execute(SCHEMA)
             logger.info("database schema ready")
-            return True
+            break
         except Exception as exc:                       # noqa: BLE001
             logger.warning("DB init attempt %d failed: %s", attempt + 1, exc)
             time.sleep(min(5 * (attempt + 1), 20))
-    logger.error("database initialization failed — the service keeps running "
-                 "and retries on every use")
-    return False
+    else:
+        logger.error("database initialization failed — the service keeps "
+                     "running and retries on every use")
+        return False
+    for statement in INDEXES:
+        try:
+            with _cursor(commit=True) as cur:
+                cur.execute(statement)
+        except Exception as exc:                       # noqa: BLE001
+            logger.warning("index not created (%s): %s", statement[:40], exc)
+    return True
 
 
 # ------------------------------------------------------------- helpers ---
@@ -231,6 +249,24 @@ def rig_get(rig_id: str) -> Optional[dict]:
         return None
 
 
+def rig_name_owner(name: str) -> Optional[str]:
+    """Which rig owns a setup name.  ``''`` if nobody, ``None`` on error.
+
+    Names are how people tell setups apart in the chat, so two setups
+    called "ATTODRY" would make every message ambiguous and every /rigs
+    list a guess.  Compared case-insensitively for the same reason.
+    """
+    try:
+        with _cursor() as cur:
+            cur.execute("SELECT rig_id FROM rigs WHERE lower(name) = lower(%s)",
+                        (str(name or "").strip(),))
+            row = cur.fetchone()
+        return row["rig_id"] if row else ""
+    except Exception as exc:                           # noqa: BLE001
+        logger.error("rig_name_owner(%s) failed: %s", name, exc)
+        return None
+
+
 def rig_create(rig_id: str, name: str, token: str,
                allow_control: bool) -> Optional[dict]:
     """Trust-on-first-use registration; returns the row or None on error."""
@@ -248,22 +284,28 @@ def rig_create(rig_id: str, name: str, token: str,
             )
             row = cur.fetchone()
         return dict(row) if row else {}
+    except psycopg2.errors.UniqueViolation:            # noqa: E722
+        return {"error": "name_taken"}
     except Exception as exc:                           # noqa: BLE001
         logger.error("rig_create(%s) failed: %s", rig_id, exc)
         return None
 
 
-def rig_update_meta(rig_id: str, name: str, allow_control: bool) -> bool:
+def rig_update_meta(rig_id: str, name: str,
+                    allow_control: bool) -> Optional[str]:
+    """``'ok'``, ``'name_taken'``, or ``None`` when the database failed."""
     try:
         with _cursor(commit=True) as cur:
             cur.execute(
                 "UPDATE rigs SET name = %s, allow_control = %s "
                 "WHERE rig_id = %s",
                 (name, bool(allow_control), rig_id))
-        return True
+        return "ok"
+    except psycopg2.errors.UniqueViolation:            # noqa: E722
+        return "name_taken"
     except Exception as exc:                           # noqa: BLE001
         logger.error("rig_update_meta(%s) failed: %s", rig_id, exc)
-        return False
+        return None
 
 
 def rig_seen(rig_id: str, state: dict, sweep_state: str) -> bool:

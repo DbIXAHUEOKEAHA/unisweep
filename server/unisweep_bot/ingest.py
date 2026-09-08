@@ -148,20 +148,38 @@ async def hello(request: web.Request) -> web.Response:
     rig = await asyncio.to_thread(db.rig_get, rig_id)
     if rig is None:
         return _fail(503, "database unavailable")
+
+    # Setup names are how people tell setups apart in the chat, so they
+    # have to be unique across the service — otherwise every message and
+    # every /rigs entry is ambiguous.
+    if name:
+        owner = await asyncio.to_thread(db.rig_name_owner, name)
+        if owner is None:
+            return _fail(503, "database unavailable")
+        if owner and owner != rig_id:
+            return _fail(409, "name_taken")
+
     if not rig:
         created = await asyncio.to_thread(db.rig_create, rig_id, name, token,
                                           allow_control)
         if created is None:
             return _fail(503, "database unavailable")
+        if created.get("error") == "name_taken":
+            return _fail(409, "name_taken")
         rig = await asyncio.to_thread(db.rig_get, rig_id)
         if not rig:
             return _fail(503, "registration did not stick")
-        logger.info("registered rig %s (%s)", rig_id, name)
+        logger.info("registered setup %s (%s)", rig_id, name)
     elif not db.token_matches(token, rig.get("token_hash", "")):
         return _fail(401, "this rig id is taken by another token")
     else:
-        await asyncio.to_thread(db.rig_update_meta, rig_id,
-                                name or rig.get("name", ""), allow_control)
+        status = await asyncio.to_thread(db.rig_update_meta, rig_id,
+                                         name or rig.get("name", ""),
+                                         allow_control)
+        if status is None:
+            return _fail(503, "database unavailable")
+        if status == "name_taken":
+            return _fail(409, "name_taken")
 
     roster = await _roster(rig_id)
     return web.json_response({

@@ -11,7 +11,17 @@ exists for: handlers that implicitly assume a sweep has populated columns
 
 import os
 import sys
+import tempfile
 import time
+
+
+def scratch(name: str) -> str:
+    """A throwaway core directory.
+
+    Not a hardcoded /tmp: this test is most often run on the Windows
+    machine that owns the instruments.
+    """
+    return os.path.join(tempfile.gettempdir(), name)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -78,7 +88,7 @@ class FakeRegistry:
 
 def main():
     appmod.DeviceRegistry = FakeRegistry
-    app = appmod.App("/tmp/uni_coldstart")
+    app = appmod.App(scratch("uni_coldstart"))
     tk_errors = []
     app.root.report_callback_exception = \
         lambda et, ev_, tb: tk_errors.append((et.__name__, str(ev_)))
@@ -227,7 +237,7 @@ def lifecycle_check():
     import shutil
     import tests.mock_driver as md
 
-    core = "/tmp/uni_lifecycle"
+    core = scratch("uni_lifecycle")
     shutil.rmtree(core, ignore_errors=True)
     os.makedirs(os.path.join(core, "resources"))
     os.makedirs(os.path.join(core, "config"))
@@ -249,6 +259,13 @@ def lifecycle_check():
         fh.write("done\n")
     with open(os.path.join(core, "config", "repo_index.json"), "w") as fh:
         json.dump({"drivers": {}, "packages": []}, fh)
+    # The startup autoconnect deliberately opens every assigned instrument,
+    # on a timer ~0.7 s after the window appears — which lands inside the
+    # switching storm below and makes "did switching open this?"
+    # unanswerable. Switch it off so the first assertion measures what its
+    # name says; autoconnect gets its own phase at the end.
+    with open(os.path.join(core, "config", "settings.json"), "w") as fh:
+        json.dump({"connect_on_start": False}, fh)
 
     import importlib
     importlib.reload(appmod)                 # restore the real registry
@@ -282,8 +299,10 @@ def lifecycle_check():
         for name in ("Set & Get", "Devices", "Settings", "Sweep"):
             app.show_page(name)
             pump(0.05)
-    assert md.MockDevice.init_log == [], \
-        f"switching alone must not open instruments: {md.MockDevice.init_log}"
+    assert md.MockDevice.init_log == [], (
+        f"switching alone must not open instruments: "
+        f"{md.MockDevice.init_log} (autoconnect is off for this phase, so "
+        f"something in page/dimension switching connected them)")
 
     # ---- monitor + sweep + Test: connect once each, reuse everywhere --
     app.show_page("Set & Get")
@@ -322,6 +341,16 @@ def lifecycle_check():
     assert counts == {"D1": 1, "D2": 1}, \
         f"instruments initialised more than once: {md.MockDevice.init_log}"
 
+    # ---- autoconnect must not re-open what is already connected ------
+    app.settings.connect_on_start = True
+    app._autoconnect_started = False
+    app._start_autoconnect()
+    pump(0.5)
+    assert {a: md.MockDevice.init_log.count(a)
+            for a in ("D1", "D2")} == counts, (
+        f"autoconnect re-opened already-connected instruments: "
+        f"{md.MockDevice.init_log}")
+
     # ---- close the app: every opened instrument gets close() ---------
     app._on_close()
     assert sorted(md.MockDevice.close_log) == ["D1", "D2"], \
@@ -341,7 +370,7 @@ def control_surface_check():
     the part that catches a renamed attribute or a getter that raises.
     """
     appmod.DeviceRegistry = FakeRegistry
-    app = appmod.App("/tmp/uni_controls")
+    app = appmod.App(scratch("uni_controls"))
     tk_errors = []
     app.root.report_callback_exception = \
         lambda et, ev_, tb: tk_errors.append((et.__name__, str(ev_)))
@@ -425,7 +454,7 @@ def control_surface_check():
     pump(0.2)
     assert checked["ok"], checked
     # the script file buttons go through the GUI's own file dialogs
-    script_file = os.path.join("/tmp/uni_controls", "smoke_script.py")
+    script_file = os.path.join(scratch("uni_controls"), "smoke_script.py")
     saved = session.press("sweep.save_script", files=[script_file])
     pump(0.2)
     assert saved["ok"], saved
@@ -475,8 +504,8 @@ def control_surface_check():
 
 if __name__ == "__main__":
     import shutil
-    shutil.rmtree("/tmp/uni_coldstart", ignore_errors=True)
-    shutil.rmtree("/tmp/uni_controls", ignore_errors=True)
+    for _name in ("uni_coldstart", "uni_lifecycle", "uni_controls"):
+        shutil.rmtree(scratch(_name), ignore_errors=True)
     main()
     lifecycle_check()
     control_surface_check()

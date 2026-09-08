@@ -45,23 +45,19 @@ class AppSettings:
     agent_port: int = 0                # 0 = let the OS pick a free port
     agent_token: str = ""              # generated on first enable
     # ---- notifications ------------------------------------------------
-    #: 'service' — the shared Unisweep bot the group runs on its own
-    #: server: the user supplies only a chat id and arranges everything
-    #: else from Telegram.  'bot' — the original private-token mode, one
-    #: message when a sweep ends and nothing more.
-    tg_mode: str = "service"
-    tg_enabled: bool = False
-    tg_chat_id: str = ""
-    tg_on_error: bool = True
-    #: 'bot' mode only — a token from @BotFather, stored locally
-    tg_token: str = ""
-    #: 'service' mode: where the bot lives, and who this rig is.  The rig
-    #: identity is generated on first use and is this installation's only
-    #: credential; the database password never comes near this machine.
-    tg_service_url: str = ""
+    # There is one bot for the whole group and every installation is
+    # configured for it out of the box, so there is nothing to switch on
+    # and no address to type.  What is stored here is only who *this*
+    # setup is: an identity it generated for itself the first time it
+    # reported.  Nothing is delivered to anybody until a person pairs
+    # with a code.
     tg_rig_id: str = ""
     tg_rig_token: str = ""
     tg_rig_name: str = ""
+    #: normally empty — the address is compiled in; see
+    #: ``unisweep.core.telegram_link.service_url``.  Set only when running
+    #: against a private copy of the service.
+    tg_service_url: str = ""
     #: let the bot pause / stop / ramp-to-zero a running sweep.  Off by
     #: default, because it acts on real instruments.
     tg_allow_control: bool = False
@@ -96,9 +92,6 @@ class AppSettings:
         out.stall_warn_s = max(float(out.stall_warn_s), 0.5)
         out.stall_abort_s = max(float(out.stall_abort_s),
                                 out.stall_warn_s + 0.5)
-        if out.tg_mode not in ("service", "bot"):
-            out.tg_mode = "service"
-        out.tg_chat_id = str(out.tg_chat_id or "").strip()
         out.tg_service_url = str(out.tg_service_url or "").strip().rstrip("/")
         try:
             out.tg_push_s = max(float(out.tg_push_s), 5.0)
