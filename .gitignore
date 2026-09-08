@@ -14,3 +14,8 @@ setget/
 desktop.ini
 Thumbs.db
 .DS_Store
+
+# instrument runtime logs (MultiVu and friends write these next to
+# the drivers) and Office lock files
+*.log
+~$*

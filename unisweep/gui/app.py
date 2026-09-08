@@ -48,6 +48,7 @@ class App:
         self.root = tk.Tk()
         self.root.title("Unisweep")
         self.root.minsize(1100, 700)
+        self._apply_window_icon()
         self.settings = AppSettings.load(core_dir)
         _theme.init_theme(self.settings.theme)
         apply_theme(self.root)
@@ -184,6 +185,52 @@ class App:
         self._wizard = None
         self.root.after(300, self._maybe_run_setup)
         self.root.after(1200, lambda: self.refresh_catalog_async())
+
+    # ---------------- window icon ---------------------------------------
+    @staticmethod
+    def _logo_path() -> str:
+        """``logo.ico``, next to main.py — beside the package when the
+        application is run from a checkout, and beside the executable
+        when it is not."""
+        package = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        for candidate in (os.path.join(os.path.dirname(package), "logo.ico"),
+                          os.path.join(package, "logo.ico")):
+            if os.path.exists(candidate):
+                return candidate
+        return ""
+
+    def _apply_window_icon(self) -> None:
+        """Put logo.ico on the window, and on every window that follows.
+
+        ``default=True`` is the point: the plot windows, the settings
+        dialogs and the setup wizard are all Toplevels, and this way they
+        inherit the icon instead of each needing to remember it.
+
+        Windows reads .ico directly. X11 cannot, so there it falls back to
+        a PhotoImage through Pillow, which matplotlib already brings in.
+        Neither is worth failing over — a missing or unreadable logo must
+        never be the reason the application will not start.
+        """
+        path = self._logo_path()
+        if not path:
+            return
+        try:
+            self.root.iconbitmap(default=path)
+            return
+        except Exception:                          # noqa: BLE001
+            pass                                   # not Windows, or no .ico
+        try:
+            from PIL import Image, ImageTk
+            image = Image.open(path)
+            # the .ico carries a 1254px master; window managers want
+            # something the size of a title bar, not a poster
+            image.thumbnail((128, 128))
+            #: kept on the instance: Tk holds no reference of its own and
+            #: a garbage-collected PhotoImage silently blanks the icon
+            self._icon_image = ImageTk.PhotoImage(image)
+            self.root.iconphoto(True, self._icon_image)
+        except Exception:                          # noqa: BLE001
+            pass
 
     # ---------------- assistant endpoint --------------------------------
     def start_agent_endpoint(self) -> bool:
@@ -350,7 +397,9 @@ class App:
 
         def work():
             n = restyle_saved_images(data_dir, config.zcol, vmin, vmax,
-                                     labels, title=config.title)
+                                     labels, title=config.title,
+                                     cmap=config.cmap,
+                                     ztransform=config.ztransform)
             self.event_queue.put(
                 ("notify_result",
                  f"plot settings applied to {n} saved image(s)"

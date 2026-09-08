@@ -115,6 +115,15 @@ def main():
         app._wizard._skip()
     pump(0.2)
 
+    # ---- 0. the window icon ------------------------------------------
+    # logo.ico sat in the repo unreferenced until it was wired up; this
+    # keeps it wired. Windows takes the .ico through iconbitmap, X11
+    # needs the Pillow/iconphoto fallback — either counts.
+    assert appmod.App._logo_path(), "logo.ico not found for the window icon"
+    assert (getattr(app, "_icon_image", None) is not None
+            or bool(app.root.wm_iconbitmap())), \
+        "logo.ico was found but never reached the window"
+
     # ---- 1. cold plot spawning (the reported crash) -------------------
     line = app.plots.spawn("line")
     mp = app.plots.spawn("map")

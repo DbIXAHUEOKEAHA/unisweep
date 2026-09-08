@@ -2009,3 +2009,260 @@ if __name__ == "__main__":
 
 
 # --------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Nested-loop returns, parallel approach, walk numbering, image restyling and
+# filename parsing.
+#
+# The behaviour these cover already shipped (commits "Multiple bugs fixed —
+# core 3D sweep return logic..." and "Graph and maps windows are floating
+# atop"); the tests themselves were written alongside it and never committed.
+# Recovered so the features have the regression cover they were given.
+# ---------------------------------------------------------------------------
+def test_return_moves_slave_and_inner_together():
+    """The mid-sweep return repositions slave AND the finished inner
+    axis simultaneously (inner not snake): interleaved timestamps."""
+    devs = {"MA": MockDevice("MA"),
+            "SL": MockDevice("SL"),
+            "SS": MockDevice("SS")}
+    prog = SweepProgram(
+        axes=(AxisProgram(device="MA", parameter="Volt", start=0, stop=1,
+                          rate=1.0, delay=0.0, count_mode=CountMode.STEP),
+              AxisProgram(device="SL", parameter="Volt", start=0, stop=0.3,
+                          rate=0.1, delay=0.02, count_mode=CountMode.STEP),
+              AxisProgram(device="SS", parameter="Curr", start=0, stop=0.3,
+                          rate=0.1, delay=0.02,
+                          count_mode=CountMode.STEP)),
+        reads=("SS.Curr",), save_maps=False)
+    evs, _, _ = run_engine(prog, devs, timeout=90)
+    rets = [e for e in evs if isinstance(e, ev.ApproachStarted)
+            and e.phase == "return"]
+    assert rets, "return phases must be announced"
+    assert {t[1] for t in rets[0].targets} == {"SL", "SS"}, \
+        f"slave and inner return together: {rets[0].targets}"
+
+def test_return_uses_back_params_and_rate():
+    """back_rate/back_delay on the slave = the return's step and speed."""
+    devs = {"MA": MockDevice("MA"),
+            "SL": MockDevice("SL", sweepable_flags=[True, False],
+                             ramp_rate=50.0),
+            "SS": MockDevice("SS")}
+    prog = SweepProgram(
+        axes=(AxisProgram(device="MA", parameter="Volt", start=0, stop=1,
+                          rate=1.0, delay=0.0, count_mode=CountMode.STEP),
+              AxisProgram(device="SL", parameter="Volt", start=0, stop=0.4,
+                          rate=0.2, delay=0.0, count_mode=CountMode.STEP,
+                          force_stepwise=True, back_rate=0.4,
+                          back_delay=0.001),
+              AxisProgram(device="SS", parameter="Curr", start=0, stop=0.1,
+                          rate=0.1, delay=0.002, count_mode=CountMode.STEP)),
+        reads=("SS.Curr",), save_maps=False)
+    run_engine(prog, devs, timeout=60)
+    sl = [(round(v, 6), sp) for (p, v, sp, t) in devs["SL"].set_log]
+    # forward pass 0, .2, .4 — then the return: with back step 0.4 the
+    # whole way back is ONE stroke, commanded at the BACK rate
+    assert sl[:4] == [(0.0, None), (0.2, None), (0.4, None), (0.0, 0.4)], \
+        f"return must use the BACK step and back rate: {sl}"
+
+def test_snake_slave_does_not_return():
+    devs = {n: MockDevice(n) for n in ("MA", "SL", "SS")}
+    prog = SweepProgram(
+        axes=(AxisProgram(device="MA", parameter="Volt", start=0, stop=1,
+                          rate=1.0, delay=0.0, count_mode=CountMode.STEP),
+              AxisProgram(device="SL", parameter="Volt", start=0, stop=0.4,
+                          rate=0.2, delay=0.0, count_mode=CountMode.STEP,
+                          snake=True),
+              AxisProgram(device="SS", parameter="Curr", start=0, stop=0.1,
+                          rate=0.05, delay=0.002,
+                          count_mode=CountMode.STEP)),
+        reads=("SS.Curr",), save_maps=False)
+    run_engine(prog, devs, timeout=60)
+    sl = [round(v, 6) for (p, v, sp, t) in devs["SL"].set_log]
+    assert sl == [0.0, 0.2, 0.4, 0.4, 0.2, 0.0], \
+        f"snake slave reverses for master 2, no repositioning return: {sl}"
+
+def test_3d_slave_returns_stepwise_before_master_steps():
+    """slave-slave walks back&forth per slave point; slave then RETURNS
+    to its start (its own steps, nothing swept below) BEFORE master
+    steps; master never returns."""
+    devs = {n: MockDevice(n) for n in ("MA", "SL", "SS")}
+    prog = SweepProgram(
+        axes=(AxisProgram(device="MA", parameter="Volt", start=0, stop=1,
+                          rate=1.0, delay=0.0, count_mode=CountMode.STEP),
+              AxisProgram(device="SL", parameter="Volt", start=0, stop=0.4,
+                          rate=0.2, delay=0.0, count_mode=CountMode.STEP),
+              AxisProgram(device="SS", parameter="Curr", start=0, stop=0.2,
+                          rate=0.1, delay=0.002, count_mode=CountMode.STEP,
+                          walks=2)),
+        reads=("SS.Curr",), save_maps=False)
+    evs, _, _ = run_engine(prog, devs, timeout=60)
+    log = sorted([(t, d, v) for d in devs
+                  for (p, v, sp, t) in devs[d].set_log], key=lambda e: e[0])
+    seq = [(d, round(v, 6)) for (t, d, v) in log]
+    # slave return: after the last slave point (0.4), 0.2 then 0.0 appear
+    # BEFORE the second master set
+    i_master2 = seq.index(("MA", 1.0))
+    before = seq[:i_master2]
+    tail = [e for e in before if e[0] == "SL"]
+    assert tail[-3:] == [("SL", 0.4), ("SL", 0.2), ("SL", 0.0)], \
+        f"slave must walk back to start before master steps: {tail}"
+    # nothing swept below during the return: between SL 0.2(return) and
+    # MA 1.0 there must be no SS sets
+    i_ret = len(before) - 1 - before[::-1].index(("SL", 0.2))
+    between = [e for e in seq[i_ret:i_master2] if e[0] == "SS"]
+    assert between == [], f"slave-slave must NOT sweep during the " \
+                          f"return: {between}"
+    # master never returns: last MA set is its final point
+    ma = [v for (d, v) in seq if d == "MA"]
+    assert ma == [0.0, 1.0], f"master steps only forward: {ma}"
+    # and after everything, no MA set back to 0
+    assert seq[-1][0] != "MA" or seq[-1][1] == 1.0
+
+def test_2d_outer_single_pass_even_with_walks_configured():
+    """2D: master makes exactly ONE forward pass — configured walks on a
+    non-innermost axis no longer replay the whole nested loop."""
+    devs = {"MA": MockDevice("MA"), "IN": MockDevice("IN")}
+    prog = SweepProgram(
+        axes=(AxisProgram(device="MA", parameter="Volt", start=0, stop=1,
+                          rate=0.5, delay=0.0, count_mode=CountMode.STEP,
+                          walks=2),
+              AxisProgram(device="IN", parameter="Curr", start=0, stop=0.1,
+                          rate=0.05, delay=0.002,
+                          count_mode=CountMode.STEP)),
+        reads=("IN.Curr",), save_maps=False)
+    run_engine(prog, devs, timeout=60)
+    ma = [round(v, 6) for (p, v, sp, t) in devs["MA"].set_log]
+    assert ma == [0.0, 0.5, 1.0], \
+        f"one forward pass, no measured backward walk, no return: {ma}"
+
+def test_parallel_approach_moves_instruments_at_once():
+    """Two stepwise axes parked away from start: their approach steps
+    must INTERLEAVE in time (parallel), not run one axis after the
+    other; ApproachStarted/Finished bracket the phase."""
+    d1 = MockDevice("A1"); d1._values["Volt"] = 0.5
+    d2 = MockDevice("A2"); d2._values["Curr"] = 0.25
+    prog = SweepProgram(
+        axes=(AxisProgram(device="A1", parameter="Volt", start=0, stop=0.6,
+                          rate=0.1, delay=0.03, count_mode=CountMode.STEP),
+              AxisProgram(device="A2", parameter="Curr", start=0, stop=0.3,
+                          rate=0.05, delay=0.03,
+                          count_mode=CountMode.STEP)),
+        reads=("A2.Curr",), save_maps=False)
+    evs, _, _ = run_engine(prog, {"A1": d1, "A2": d2}, timeout=60)
+    starts = [e for e in evs if isinstance(e, ev.ApproachStarted)]
+    fins = [e for e in evs if isinstance(e, ev.ApproachFinished)]
+    assert starts and fins
+    assert {t[1] for t in starts[0].targets} == {"A1", "A2"}
+    a1 = [t for (p, v, sp, t) in d1.set_log if v < 0.49]
+    a2 = [t for (p, v, sp, t) in d2.set_log if v < 0.24]
+    assert a1 and a2
+    assert a1[0] < a2[-1] and a2[0] < a1[-1], \
+        "approach steps of the two instruments must interleave in time"
+
+def test_point_measured_carries_walk_number():
+    dev = MockDevice("M1")
+    prog = SweepProgram(
+        axes=(AxisProgram(device="M1", parameter="Volt", start=0, stop=0.5,
+                          rate=0.25, delay=0.005, count_mode=CountMode.STEP,
+                          walks=2),),
+        reads=())
+    evs, _, _ = run_engine(prog, {"M1": dev}, timeout=25)
+    walks = [e.walk for e in evs if isinstance(e, ev.PointMeasured)]
+    assert walks == [1, 1, 1, 2, 2], walks
+
+def test_restyle_saved_images_rerenders_png():
+    """Applying plot settings to saved files: the PNG is re-rendered
+    from its table with the new limits/labels/title."""
+    import tempfile
+    from unisweep.core.maps import restyle_saved_images
+    data_dir = tempfile.mkdtemp()
+    tdir = os.path.join(data_dir, "2d_maps", "tables", "run_1")
+    os.makedirs(tdir)
+    table = os.path.join(tdir, "run_M2.Curr_map_1.csv")
+    with open(table, "w") as fh:
+        fh.write("T / V,0.0,0.5,1.0\n")
+        fh.write("1.0,0.1,0.2,0.3\n")
+        fh.write("2.0,0.2,0.4,0.6\n")
+    n = restyle_saved_images(data_dir, "M2.Curr", vmin=0.0, vmax=1.0,
+                             labels={"x": "V (V)", "y": "T (K)"},
+                             title="restyled")
+    assert n == 1, n
+    png = os.path.join(data_dir, "2d_maps", "images", "run_1",
+                       "run_M2.Curr_map_1.png")
+    assert os.path.exists(png) and os.path.getsize(png) > 5000
+    size1 = os.path.getsize(png)
+    n = restyle_saved_images(data_dir, "M2.Curr", vmin=0.0, vmax=0.2,
+                             labels={}, title="clipped")
+    assert n == 1 and os.path.getsize(png) != size1, \
+        "new style must actually change the rendered file"
+
+def test_filename_folder_name_and_extension_logic():
+    import datetime
+    import tempfile
+    from unisweep.core.writer import DataWriter
+    ymd = datetime.datetime.today().strftime("%y%m%d")
+    core = tempfile.mkdtemp()
+
+    def run(filename):
+        w = DataWriter(core, ["a"], filename)
+        p = w.open_file()
+        w.write((1,))
+        w.close()
+        return p
+
+    assert run("") == os.path.join(core, ymd, "data_files",
+                                   f"{ymd}-1.csv")
+    fold = tempfile.mkdtemp()          # folder only -> dated inside it
+    assert run(fold) == os.path.join(fold, ymd, "data_files",
+                                     f"{ymd}-1.csv")
+    par = tempfile.mkdtemp()           # full name -> dated in the parent
+    assert run(os.path.join(par, "myscan")) == \
+        os.path.join(par, ymd, "data_files", "myscan-1.csv")
+    p = run(os.path.join(par, "raw.dat"))     # deliberate extension kept
+    assert p.endswith(os.path.join(ymd, "data_files", "raw-1.dat")), p
+    assert run("gatecheck") == os.path.join(   # bare name -> core dated
+        core, ymd, "data_files", "gatecheck-1.csv")
+
+
+def test_restyle_applies_the_colormap_and_transform_to_saved_images():
+    """'Apply the plot window's settings to the saved files' means ALL of
+    them. The colormap and the z-transform are settings, and a saved
+    image that ignored them was the bug behind "I applied the settings
+    and the colours did not change" — the limits, labels and title were
+    re-applied, the colormap was hardcoded to viridis.
+
+    Written against the PIXELS. The test above checks that the byte count
+    moves when the LIMITS change, which stayed green for as long as the
+    colormap never reached the renderer at all.
+    """
+    import tempfile
+    import matplotlib
+    matplotlib.use("Agg", force=False)
+    import matplotlib.image as mpimg
+    from unisweep.core.maps import restyle_saved_images
+
+    data_dir = tempfile.mkdtemp()
+    tdir = os.path.join(data_dir, "2d_maps", "tables", "run_1")
+    os.makedirs(tdir)
+    with open(os.path.join(tdir, "run_M2.Curr_map_1.csv"), "w") as fh:
+        fh.write("T / V,0.0,0.5,1.0\n")
+        fh.write("1.0,0.1,0.2,0.3\n")
+        fh.write("2.0,0.2,0.4,0.6\n")
+    png = os.path.join(data_dir, "2d_maps", "images", "run_1",
+                       "run_M2.Curr_map_1.png")
+
+    def render(**style):
+        assert restyle_saved_images(data_dir, "M2.Curr", **style) == 1
+        return mpimg.imread(png).copy()
+
+    # the same style twice must give the same pixels, or every comparison
+    # below would be satisfied by rendering noise alone
+    plain = render(cmap="viridis")
+    assert np.array_equal(plain, render(cmap="viridis"))
+
+    assert not np.array_equal(plain, render(cmap="magma")), \
+        "the colormap must reach the saved PNG"
+    assert not np.array_equal(plain, render(cmap="viridis",
+                                            ztransform="v ** 2")), \
+        "the z-transform must reach the saved PNG"

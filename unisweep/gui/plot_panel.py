@@ -36,7 +36,7 @@ from matplotlib.backends.backend_tkagg import (FigureCanvasTkAgg,
                                                NavigationToolbar2Tk)
 from matplotlib.figure import Figure
 
-from ..core.expr import ExprError, SafeExpr
+from ..core.expr import ExprError, SafeExpr, apply_transform
 from ..core.livedata import LiveData, LiveMaps
 from ..core.maps import index_ticks
 from .theme import PALETTE
@@ -103,13 +103,9 @@ class PlotConfig:
 
 
 def _apply_transform(expr_text: str, values: np.ndarray) -> np.ndarray:
-    if not expr_text.strip() or values.size == 0:
-        return values
-    try:
-        expr = SafeExpr(expr_text, {"v": "v", "x": "v"})
-        return np.asarray(expr({"v": values}), dtype=float)
-    except (ExprError, Exception):     # noqa: BLE001
-        return values
+    # One implementation, shared with the saved-image renderer: a
+    # restyled PNG has to show the same numbers this window does.
+    return apply_transform(expr_text, values)
 
 
 class PlotSettingsDialog(tk.Toplevel):

@@ -483,3 +483,201 @@ if __name__ == "__main__":
 
 
 # --------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Driver-name case resolution and one-instance-per-address connection.
+# Written alongside the "Lowercase devices libraries" change and never
+# committed; recovered here.
+# ---------------------------------------------------------------------------
+def test_driver_class_name_case_and_imported_base(tmpdir=None):
+    """Real-world driver files: 'Keithley2400.py' defines class
+    'keithley2400' and 'SR830.py' defines 'sr830' while ALSO importing a
+    vendor class literally named SR830. Both must be detected (green
+    row), and the module's OWN class must win over the imported one."""
+    import json
+    import tempfile
+    from unisweep.core.devices import DeviceRegistry
+    core = tempfile.mkdtemp()
+    os.makedirs(os.path.join(core, "resources"))
+    os.makedirs(os.path.join(core, "config"))
+    res = os.path.join(core, "resources")
+    with open(os.path.join(res, "Keithley2400.py"), "w") as fh:
+        fh.write("class keithley2400:\n"
+                 "    def __init__(self, adress=None):\n"
+                 "        self.adress = adress\n"
+                 "        self.set_options = ['Volt']\n"
+                 "        self.get_options = ['Volt']\n"
+                 "    def Volt(self):\n        return 1.0\n")
+    with open(os.path.join(res, "SR830.py"), "w") as fh:
+        fh.write("class SR830:            # 'imported' vendor base\n"
+                 "    pass\n"
+                 "SR830.__module__ = 'vendor.pkg'\n"
+                 "class my_SR830(SR830):\n    pass\n"
+                 "class sr830:\n"
+                 "    def __init__(self, adress=None):\n"
+                 "        self.adress = adress\n"
+                 "        self.set_options = ['amplitude']\n"
+                 "        self.get_options = ['x']\n"
+                 "    def x(self):\n        return 0.5\n")
+    with open(os.path.join(core, "config", "address_dictionary.txt"),
+              "w") as fh:
+        json.dump({"A1": "Keithley2400", "A2": "SR830"}, fh)
+    reg = DeviceRegistry(core)
+    assert reg.is_installed("Keithley2400"), reg.import_error("Keithley2400")
+    assert reg.is_installed("SR830"), reg.import_error("SR830")
+    k = reg.driver_classes[reg.resolve_type("Keithley2400")]
+    s = reg.driver_classes[reg.resolve_type("SR830")]
+    assert k.__name__ == "keithley2400", k
+    assert s.__name__ == "sr830", \
+        f"the file's own class must win over the imported base: {s}"
+    assert reg.set_options("A1") == ["Volt"]
+    assert reg.get_options("A2") == ["x"]
+    assert reg.connect("A1").raw.__class__.__name__ == "keithley2400"
+
+def test_assignment_case_resolves_to_the_file_on_disk():
+    """An address assigned 'Keithley2400' must go green when the file on
+    disk is 'keithley2400.py' (and vice versa) — the mismatch that left
+    a correctly installed driver showing as not installed."""
+    import json
+    import tempfile
+    from unisweep.core.devices import DeviceRegistry
+    core = tempfile.mkdtemp()
+    os.makedirs(os.path.join(core, "resources"))
+    os.makedirs(os.path.join(core, "config"))
+    with open(os.path.join(core, "resources", "keithley2400.py"),
+              "w") as fh:
+        fh.write("class keithley2400:\n"
+                 "    def __init__(self, adress=None):\n"
+                 "        self.set_options = ['Volt']\n"
+                 "        self.get_options = ['Volt']\n")
+    with open(os.path.join(core, "config", "address_dictionary.txt"),
+              "w") as fh:
+        json.dump({"A1": "Keithley2400"}, fh)
+    reg = DeviceRegistry(core)
+    assert reg.is_installed("Keithley2400")
+    assert reg.import_error("Keithley2400") == ""
+    assert reg.resolve_type("Keithley2400") == "keithley2400"
+    assert reg.connect("A1") is not None
+
+def test_every_catalogue_entry_resolves_case_insensitively():
+    """Audit: for EVERY catalogue driver, the candidate list must offer
+    the exact spelling first and a lower-case fallback, so no entry can
+    be defeated by repository casing (only Keithley2400 and SR830 need
+    the fallback today, but new entries get the same protection)."""
+    import tempfile
+    from unisweep.core.catalog import DriverCatalog
+    core = tempfile.mkdtemp()
+    os.makedirs(os.path.join(core, "config"), exist_ok=True)
+    cat = DriverCatalog(core)
+    names = cat.names()
+    assert len(names) > 20, names
+    for n in names:
+        urls = [s for k, s in cat.source_candidates(n) if k == "url"]
+        assert urls, f"{n}: no download candidates"
+        assert urls[0].endswith(f"{n}.py"), \
+            f"{n}: exact spelling must be tried first ({urls[0]})"
+        assert any(u.endswith(f"{n.lower()}.py") for u in urls), \
+            f"{n}: lower-case fallback missing"
+
+def test_all_repo_driver_class_names_are_accepted():
+    """The two files whose class name differs from the file name are
+    Keithley2400 (class keithley2400) and SR830 (class sr830, plus an
+    imported vendor SR830). Both shapes — and the ordinary matching
+    ones, including a file with helper classes — must resolve."""
+    import tempfile
+    from unisweep.core.devices import _driver_class_of
+    import types as _t
+
+    def module_from(src: str, name: str):
+        mod = _t.ModuleType(f"unisweep_drivers.{name}")
+        exec(compile(src, f"{name}.py", "exec"), mod.__dict__)
+        for obj in list(mod.__dict__.values()):
+            if isinstance(obj, type) and obj.__module__ == "builtins":
+                obj.__module__ = mod.__name__
+        return mod
+
+    cases = [
+        ("Keithley2400", "class keithley2400:\n    set_options=['V']\n",
+         "keithley2400"),
+        ("sr860", "class my_SR860:\n    pass\n"
+                  "class sr860:\n    set_options=['amplitude']\n", "sr860"),
+        ("LakeShore336", "class LakeShore336:\n    set_options=['T']\n",
+         "LakeShore336"),
+        ("keithley_series_2600b",
+         "class My_Keithley_2600:\n    pass\n"
+         "class keithley_series_2600b:\n    set_options=['V']\n",
+         "keithley_series_2600b"),
+    ]
+    for mod_name, src, expected in cases:
+        mod = module_from(src, mod_name)
+        cls = _driver_class_of(mod, mod_name)
+        assert cls is not None and cls.__name__ == expected, \
+            f"{mod_name}: got {cls}"
+
+    # the vendor-import shadow: file defines sr830, imports SR830
+    mod = _t.ModuleType("unisweep_drivers.SR830")
+    class _Vendor:                      # 'from pymeasure... import SR830'
+        pass
+    _Vendor.__name__ = "SR830"
+    _Vendor.__module__ = "pymeasure.instruments.srs"
+    mod.SR830 = _Vendor
+    exec(compile("class sr830:\n    set_options=['amplitude']\n",
+                 "SR830.py", "exec"), mod.__dict__)
+    mod.sr830.__module__ = mod.__name__
+    cls = _driver_class_of(mod, "SR830")
+    assert cls is mod.sr830, f"own class must win, got {cls}"
+
+def test_source_candidates_try_case_variants():
+    """The repository stores 'keithley2400.py' / 'sr830.py' in lower
+    case while the catalog lists them capitalised — raw GitHub URLs are
+    case-sensitive, so both spellings must be attempted."""
+    import tempfile
+    from unisweep.core.catalog import DriverCatalog
+    core = tempfile.mkdtemp()
+    os.makedirs(os.path.join(core, "config"), exist_ok=True)
+    cat = DriverCatalog(core)
+    for name, wanted in (("Keithley2400", "keithley2400.py"),
+                         ("SR830", "sr830.py")):
+        urls = [spec for kind, spec in cat.source_candidates(name)
+                if kind == "url"]
+        assert any(u.endswith(wanted) for u in urls), \
+            f"{name}: lower-case URL missing from {urls[:4]}"
+        assert any(u.endswith(f"{name}.py") for u in urls), \
+            f"{name}: exact-case URL missing"
+        assert urls.index(next(u for u in urls
+                               if u.endswith(f"{name}.py"))) < \
+            urls.index(next(u for u in urls if u.endswith(wanted))), \
+            "the exact name must still be tried first"
+
+def test_concurrent_connect_yields_single_instance():
+    """Two threads racing connect() on the same address: one driver
+    __init__, one shared adapter — and a slow open must not block a
+    connect to a DIFFERENT address."""
+    import threading as th
+    import time as _t
+    registry, Mock = _life_core()
+
+    class Slow(Mock):
+        def __init__(self, adress=None):
+            _t.sleep(0.3)
+            super().__init__(adress)
+    registry.driver_classes["SlowDev"] = Slow
+    registry.assign("SLOW::1", "SlowDev")
+    Mock.init_log.clear()
+
+    got = {}
+    def grab(tag, addr):
+        got[tag] = registry.connect(addr)
+    t1 = th.Thread(target=grab, args=("a", "SLOW::1"))
+    t2 = th.Thread(target=grab, args=("b", "SLOW::1"))
+    t1.start(); t2.start()
+    _t.sleep(0.05)
+    t0 = _t.perf_counter()
+    registry.connect("GPIB0::5::INSTR")     # other address: must not wait
+    other_dt = _t.perf_counter() - t0
+    t1.join(5); t2.join(5)
+    assert got["a"] is got["b"], "racing connects must share the instance"
+    assert Mock.init_log.count("SLOW::1") == 1, Mock.init_log
+    assert other_dt < 0.2, \
+        f"a slow open must not block other addresses: {other_dt:.2f}s"

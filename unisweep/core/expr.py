@@ -26,7 +26,8 @@ import ast
 import math
 import numpy as np
 
-__all__ = ["ExprError", "SafeExpr", "AXIS_ALIASES", "split_lines"]
+__all__ = ["ExprError", "SafeExpr", "AXIS_ALIASES", "split_lines",
+           "apply_transform"]
 
 # Names the user may call as functions.
 _FUNCTIONS = {
@@ -63,6 +64,28 @@ class ExprError(ValueError):
 def split_lines(text: str) -> list[str]:
     """Split multi-line condition text into non-empty stripped lines."""
     return [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+
+
+def apply_transform(expr_text: str, values):
+    """Apply a user axis/colour transform to an array of values.
+
+    Shared by the live plot windows and by the saved-image renderer, so a
+    restyled PNG shows the same numbers the window on screen does — the
+    whole point of "apply these settings to the saved files".
+
+    A transform that will not compile or evaluate leaves the values
+    untouched: a half-typed expression in a settings box must not blank a
+    plot, and must certainly not blank a saved file.
+    """
+    text = (expr_text or "").strip()
+    values = np.asarray(values)
+    if not text or values.size == 0:
+        return values
+    try:
+        expr = SafeExpr(text, {"v": "v", "x": "v"})
+        return np.asarray(expr({"v": values}), dtype=float)
+    except Exception:                              # noqa: BLE001
+        return values
 
 
 def _tol_eq(a, b, _tol):

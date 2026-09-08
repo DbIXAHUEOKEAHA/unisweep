@@ -188,10 +188,18 @@ class _Renderer(threading.Thread):
 
 
 def render_table_png(table_path, vmin, vmax, labels,
-                     title: str = "") -> Optional[str]:
+                     title: str = "", cmap: str = "viridis",
+                     ztransform: str = "") -> Optional[str]:
     """Render (or RE-render) the PNG for one saved map table — the same
     output the sweep produces, so applying a plot window's settings to
-    the saved images is a matter of calling this again with new style."""
+    the saved images is a matter of calling this again with new style.
+
+    ``cmap`` and ``ztransform`` mirror what the plot window draws with. A
+    saved image that ignored them was the bug behind "I applied the
+    settings and the colours did not change": the limits, labels and
+    title were re-applied, the colormap was hardcoded.
+    """
+    from .expr import apply_transform
     import matplotlib
     matplotlib.use("Agg", force=False)
     import matplotlib.pyplot as plt
@@ -200,14 +208,16 @@ def render_table_png(table_path, vmin, vmax, labels,
     if rows is None or not len(rows):
         return None
     y = rows[:, 0]
-    z = rows[:, 1:]
+    # transform first: auto limits have to be taken from the values that
+    # are actually drawn, not from the raw table
+    z = apply_transform(ztransform, rows[:, 1:])
     image_path = _Renderer._image_path(table_path)
     os.makedirs(os.path.dirname(image_path), exist_ok=True)
     fig, ax = plt.subplots(figsize=(6, 4.5))
     if vmin is None or vmax is None:
         vmin = np.nanmin(z) if np.isfinite(z).any() else 0
         vmax = np.nanmax(z) if np.isfinite(z).any() else 1
-    m = ax.pcolormesh(np.ma.masked_invalid(z), cmap="viridis",
+    m = ax.pcolormesh(np.ma.masked_invalid(z), cmap=cmap or "viridis",
                       vmin=vmin, vmax=vmax, shading="flat")
     cb = fig.colorbar(m, ax=ax)
     cb.set_label(labels.get("param", ""))
@@ -224,7 +234,8 @@ def render_table_png(table_path, vmin, vmax, labels,
 
 def restyle_saved_images(data_dir: str, param: str, vmin=None, vmax=None,
                          labels: Optional[dict] = None,
-                         title: str = "") -> int:
+                         title: str = "", cmap: str = "viridis",
+                         ztransform: str = "") -> int:
     """Apply a plot window's settings to every SAVED image of ``param``
     under ``data_dir`` (tables re-rendered to PNG; iteration GIFs
     rebuilt when present). Returns how many PNGs were re-rendered."""
@@ -238,7 +249,8 @@ def restyle_saved_images(data_dir: str, param: str, vmin=None, vmax=None,
         for name in names:
             if tag in name and name.endswith(".csv"):
                 out = render_table_png(os.path.join(root, name),
-                                       vmin, vmax, labels, title=title)
+                                       vmin, vmax, labels, title=title,
+                                       cmap=cmap, ztransform=ztransform)
                 if out:
                     n += 1
                     gif_dirs.add(os.path.dirname(os.path.dirname(out)))
