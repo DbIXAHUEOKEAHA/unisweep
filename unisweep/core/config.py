@@ -19,6 +19,7 @@ step tables) notice a change and re-arm themselves.
 from __future__ import annotations
 
 import json
+import math
 import threading
 from dataclasses import dataclass, field, replace, asdict
 from typing import Optional, Tuple
@@ -82,14 +83,25 @@ class AxisProgram:
         return w
 
     def planned_count(self) -> int:
-        """Best-estimate number of points in one forward walk (for ETA)."""
+        """Number of points in one forward walk (drives the ETA).
+
+        The walk takes ``floor(span/step)`` whole steps plus the start, and
+        one more only when a partial step is left over — the runner clamps
+        that onto the endpoint. The float remainder has to be judged
+        against *both* ends: ``1 % 0.1`` is 0.0999…, which looks like a
+        whole leftover step and used to add a phantom point to every span
+        that happened to divide evenly in decimal.
+        """
         if self.manual_points is not None:
             return max(len(self.manual_points), 1)
         step = self.step_size(False)
-        if step <= 0:
+        if step <= 0 or not math.isfinite(step):
             return 1
         span = abs(self.stop - self.start)
-        return int(span / step) + 1 + (1 if span % step > 1e-12 * max(span, 1) else 0)
+        steps = span / step
+        whole = math.floor(steps + 1e-9)
+        leftover = steps - whole
+        return int(whole) + 1 + (1 if leftover > 1e-9 else 0)
 
 
 @dataclass(frozen=True)

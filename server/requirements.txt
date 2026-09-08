@@ -1,0 +1,8 @@
+# The job-queue extra is required: the outbox dispatcher and the silence
+# watchdog are JobQueue jobs, and without it the service refuses to start
+# rather than running blind.
+python-telegram-bot[job-queue]>=21.6,<23
+aiohttp>=3.9,<4
+psycopg2-binary>=2.9.9,<3
+matplotlib>=3.8
+numpy>=1.26

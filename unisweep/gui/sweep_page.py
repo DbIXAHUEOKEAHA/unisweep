@@ -16,6 +16,7 @@ from tkinter import filedialog, messagebox, ttk
 
 import numpy as np
 
+from ..agent import controls as ctl
 from ..core.condition import ConditionError, ConditionSet
 from ..core.config import (AxisProgram, CountMode, SweepProgram,
                            load_program, save_program)
@@ -125,10 +126,12 @@ class AxisCard(Card):
         r += 1
         row = ttk.Frame(self, style="Card.TFrame")
         row.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(8, 0))
-        ttk.Button(row, text="Load manual steps…",
-                   command=self._load_manual).pack(side="left")
-        ttk.Button(row, text="Clear",
-                   command=self._clear_manual).pack(side="left", padx=4)
+        self.manual_btn = ttk.Button(row, text="Load manual steps…",
+                                     command=self._load_manual)
+        self.manual_btn.pack(side="left")
+        self.clear_manual_btn = ttk.Button(row, text="Clear",
+                                           command=self._clear_manual)
+        self.clear_manual_btn.pack(side="left", padx=4)
         self.manual_label = ttk.Label(row, text="auto grid",
                                       style="Muted.TLabel")
         self.manual_label.pack(side="left", padx=8)
@@ -218,6 +221,62 @@ class AxisCard(Card):
             return
         self.page.apply_axis_live(self.index, ax)
 
+    # -----------------------------------------------------------------
+    def controls(self, page: str = "sweep") -> list:
+        """Named handles for every field on this card (see agent/controls)."""
+        p = f"sweep.axis{self.index + 1}"
+        t = AXIS_TITLES[self.index]
+        return [
+            ctl.choice(f"{p}.device", self.device, page=page,
+                       label=f"{t} · Device", after_set=self._device_changed,
+                       help="Instrument this axis sweeps. The bare address "
+                            "is accepted as well as the displayed "
+                            "'ADDRESS — Driver' form."),
+            ctl.choice(f"{p}.parameter", self.parameter, page=page,
+                       label=f"{t} · Parameter",
+                       help="Which settable parameter of that instrument. "
+                            "The list follows the chosen device."),
+            ctl.number(f"{p}.start", self.start, page=page,
+                       label=f"{t} · From"),
+            ctl.number(f"{p}.stop", self.stop, page=page,
+                       label=f"{t} · To"),
+            ctl.choice(f"{p}.mode", self.mode, page=page,
+                       label=f"{t} · Speed entered as",
+                       help="'rate, units/s' (step = rate × delay) or "
+                            "'step, units/pt'."),
+            ctl.number(f"{p}.rate", self.rate, page=page,
+                       label=f"{t} · Rate or step"),
+            ctl.number(f"{p}.delay", self.delay, page=page, unit="s",
+                       label=f"{t} · Delay"),
+            ctl.spin(f"{p}.walks", self.walks, page=page,
+                     label=f"{t} · Walks", minimum=1, maximum=999,
+                     help="Back-and-forth passes: 2 = there and back."),
+            ctl.flag(f"{p}.snake", self.snake, page=page,
+                     label=f"{t} · Snake",
+                     help="Boustrophedon: do not fly back between rows."),
+            ctl.flag(f"{p}.force_stepwise", self.stepwise, page=page,
+                     label=f"{t} · Force stepwise",
+                     help="Step a self-ramping instrument point by point."),
+            ctl.number(f"{p}.back_rate", self.back_rate, page=page,
+                       label=f"{t} · Return rate", allow_empty=True,
+                       help="Empty = same as forward. Setting either return "
+                            "field implies a return pass (walks 1 → 2)."),
+            ctl.number(f"{p}.back_delay", self.back_delay, page=page,
+                       label=f"{t} · Return delay", unit="s",
+                       allow_empty=True),
+            ctl.readout(f"{p}.manual_steps",
+                        lambda: self.manual_label.cget("text"), page=page,
+                        label=f"{t} · Manual step table"),
+            ctl.action(f"{p}.load_manual_steps", self.manual_btn, page=page,
+                       label=f"{t} · Load manual steps",
+                       help="Needs a file path: pass files=['/path/to.csv']."),
+            ctl.action(f"{p}.clear_manual_steps", self.clear_manual_btn,
+                       page=page, label=f"{t} · Clear manual steps"),
+            ctl.action(f"{p}.apply", self.apply_btn, page=page,
+                       label=f"{t} · Apply to running sweep",
+                       disabled_hint="only enabled while a sweep runs"),
+        ]
+
 
 class SweepPage(ttk.Frame):
 
@@ -259,10 +318,12 @@ class SweepPage(ttk.Frame):
         self.zero_btn.pack(side="left", padx=4)
         row2 = ttk.Frame(top)
         row2.pack(fill="x", pady=(6, 0))
-        ttk.Button(row2, text="Load preset",
-                   command=self._load_preset).pack(side="left", padx=(0, 4))
-        ttk.Button(row2, text="Save preset",
-                   command=self._save_preset).pack(side="left")
+        self.load_preset_btn = ttk.Button(row2, text="Load preset",
+                                          command=self._load_preset)
+        self.load_preset_btn.pack(side="left", padx=(0, 4))
+        self.save_preset_btn = ttk.Button(row2, text="Save preset",
+                                          command=self._save_preset)
+        self.save_preset_btn.pack(side="left")
 
         self.axis_cards: list[AxisCard] = []
         self.axes_holder = ttk.Frame(body, padding=(10, 6))
@@ -282,8 +343,9 @@ class SweepPage(ttk.Frame):
         self.condition.grid(row=1, column=0, sticky="ew")
         side = ttk.Frame(cond, style="Card.TFrame")
         side.grid(row=1, column=1, sticky="n", padx=(8, 0))
-        ttk.Button(side, text="Check / preview",
-                   command=self._preview_condition).pack()
+        self.check_condition_btn = ttk.Button(
+            side, text="Check / preview", command=self._preview_condition)
+        self.check_condition_btn.pack()
         ttk.Label(cond, style="Muted.TLabel", justify="left", wraplength=520,
                   text=(
             "Inequalities restrict the measured region, e.g. x**2 + y**2 <= 25. "
@@ -303,9 +365,9 @@ class SweepPage(ttk.Frame):
                                   command=self.reads_list.yview)
         reads_vsb.grid(row=1, column=2, sticky="ns")
         self.reads_list.configure(yscrollcommand=reads_vsb.set)
-        ttk.Button(reads, text="Refresh list",
-                   command=self.refresh_reads).grid(row=2, column=0,
-                                                    sticky="w", pady=(6, 0))
+        self.refresh_reads_btn = ttk.Button(reads, text="Refresh list",
+                                            command=self.refresh_reads)
+        self.refresh_reads_btn.grid(row=2, column=0, sticky="w", pady=(6, 0))
         self.reads_hint = ttk.Label(reads, text="", style="Muted.TLabel")
         self.reads_hint.grid(row=2, column=1, sticky="e", pady=(6, 0))
 
@@ -325,19 +387,44 @@ class SweepPage(ttk.Frame):
 
         script = Collapsible(body, "Per-point script (advanced)")
         script.grid(row=5, column=0, sticky="ew", padx=10, pady=(0, 12))
-        self.script = tk.Text(script.body, height=6, bg=PALETTE["field"],
+        editor = ttk.Frame(script.body, style="Card.TFrame")
+        editor.pack(fill="both", expand=True)
+        self.script = tk.Text(editor, height=6, bg=PALETTE["field"],
                               fg=PALETTE["text"],
                               insertbackground=PALETTE["text"],
                               relief="flat", padx=6, pady=4)
         self.script.pack(side="left", fill="both", expand=True)
-        script_vsb = ttk.Scrollbar(script.body, orient="vertical",
+        script_vsb = ttk.Scrollbar(editor, orient="vertical",
                                    command=self.script.yview)
         script_vsb.pack(side="right", fill="y")
         self.script.configure(yscrollcommand=script_vsb.set)
-        ttk.Label(script.body, style="Muted.TLabel", justify="left", text=(
-            "Runs after every measured point. Namespace: point (dict), "
-            "values (list), devices (dict), engine, np, time."
-        )).pack(anchor="w", pady=(4, 0))
+        script_bar = ttk.Frame(script.body, style="Card.TFrame")
+        script_bar.pack(fill="x", pady=(6, 0))
+        self.script_name = ""
+        self.load_script_btn = ttk.Button(script_bar, text="Load script…",
+                                          command=self._load_script)
+        self.load_script_btn.pack(side="left")
+        self.save_script_btn = ttk.Button(script_bar, text="Save script…",
+                                          command=self._save_script)
+        self.save_script_btn.pack(side="left", padx=4)
+        self.clear_script_btn = ttk.Button(script_bar, text="Clear",
+                                           command=self._clear_script)
+        self.clear_script_btn.pack(side="left", padx=4)
+        self.script_label = ttk.Label(script_bar, text="no file",
+                                      style="Muted.TLabel")
+        self.script_label.pack(side="left", padx=8)
+        ttk.Label(script.body, style="Muted.TLabel", justify="left",
+                  wraplength=680, text=(
+            "Runs after every measured point, inside the sweep thread.\n"
+            "Namespace: reads (the row just measured, keyed like the CSV "
+            "columns), row, columns, walk, point, values, devices, engine, "
+            "live, np, time, and stop() / pause() / to_zero().\n"
+            "This is where a reading decides something — e.g.\n"
+            "    if abs(reads['GPIB0::4::INSTR.A_current']) > 2e-9: stop()\n"
+            "or, to end the walk here instead of the whole sweep:\n"
+            "    live.update_axis(0, stop=values[0])\n"
+            "Scripts are saved under <date>/scripts."
+        )).pack(anchor="w", pady=(6, 0))
 
         self._set_dims()
         self.refresh_reads()
@@ -492,9 +579,86 @@ class SweepPage(ttk.Frame):
             back_delay=ax.back_delay, walks=ax.walks, snake=ax.snake,
             force_stepwise=ax.force_stepwise)
         cond_text = self.condition.get("1.0", "end").strip()
-        self.live.update(condition=cond_text,
-                         script=self.script.get("1.0", "end").rstrip())
-        self.app.status(f"Axis {index + 1} updated — applies on next point")
+        changes = {"condition": cond_text}
+        script_text = self.script.get("1.0", "end").rstrip()
+        profile = getattr(self.app, "profile", None)
+        allowed = profile is None or profile.interlocks.allow_script
+        if allowed:
+            changes["script"] = script_text
+        self.live.update(**changes)
+        note = "" if allowed or not script_text else \
+            " (the script was not applied: the lab profile forbids it)"
+        self.app.status(f"Axis {index + 1} updated — applies on next "
+                        f"point{note}")
+
+    # ---------------- per-point script files ----------------------------
+    def _scripts_dir(self) -> str:
+        """``<core>/<YYMMDD>/scripts`` — where the legacy app kept them."""
+        from datetime import datetime
+        path = os.path.join(self.app.core_dir,
+                            datetime.today().strftime("%y%m%d"), "scripts")
+        try:
+            os.makedirs(path, exist_ok=True)
+        except OSError:
+            return self.app.core_dir
+        return path
+
+    def _load_script(self):
+        path = filedialog.askopenfilename(
+            initialdir=self._scripts_dir(),
+            title="Load a per-point script",
+            filetypes=[("Python", "*.py"), ("Text", "*.txt"),
+                       ("All", "*.*")])
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError as exc:
+            messagebox.showerror("Script",
+                                 f"Could not read the file:\n{exc}")
+            return
+        self.script.delete("1.0", "end")
+        self.script.insert("1.0", text)
+        self.script_name = os.path.basename(path)
+        self.script_label.configure(text=self.script_name)
+        # deliberately NOT pushed into a running sweep on load: a script is
+        # arbitrary code, so it takes effect only when Apply is pressed
+        self.app.status(
+            f"Script loaded from {path}"
+            + (" — press Apply to push it into the running sweep"
+               if self.running else ""))
+
+    def _save_script(self):
+        from datetime import datetime
+        text = self.script.get("1.0", "end").rstrip()
+        if not text:
+            messagebox.showinfo("Script",
+                                "The script box is empty — nothing to save.")
+            return
+        default = self.script_name or \
+            f"script_{datetime.today().strftime('%H%M_%d%m%y')}.py"
+        path = filedialog.asksaveasfilename(
+            initialdir=self._scripts_dir(), initialfile=default,
+            title="Save the per-point script", defaultextension=".py",
+            filetypes=[("Python", "*.py"), ("All", "*.*")])
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text + "\n")
+        except OSError as exc:
+            messagebox.showerror("Script",
+                                 f"Could not save the file:\n{exc}")
+            return
+        self.script_name = os.path.basename(path)
+        self.script_label.configure(text=self.script_name)
+        self.app.status(f"Script saved to {path}")
+
+    def _clear_script(self):
+        self.script.delete("1.0", "end")
+        self.script_name = ""
+        self.script_label.configure(text="no file")
 
     # ---------------- condition preview --------------------------------
     def _preview_condition(self):
@@ -546,6 +710,83 @@ class SweepPage(ttk.Frame):
         canvas = FigureCanvasTkAgg(fig, master=win)
         canvas.get_tk_widget().pack(fill="both", expand=True)
         canvas.draw()
+
+    # ---------------- agent control surface -----------------------------
+    def controls(self) -> list:
+        """Named handles for everything on this page, axis cards included.
+
+        Only the axis cards that are actually shown are listed — the set of
+        controls an assistant sees is the set a person sees, so switching
+        dimensions changes both together.
+        """
+        page = "sweep"
+        out = [
+            ctl.choice("sweep.dimensions", self.dims, page=page,
+                       label="Dimensions", after_set=self._set_dims,
+                       help="1D / 2D / 3D. Changing this shows or hides "
+                            "axis cards."),
+            ctl.action("sweep.start", self.start_btn, page=page,
+                       label="Start sweep",
+                       help="May raise the start-position warning; answer "
+                            "it with answers=['yes'] (go to start), 'no' "
+                            "(start from here) or 'cancel'."),
+            ctl.action("sweep.pause", self.pause_btn, page=page,
+                       label="Pause / Resume",
+                       disabled_hint="only while a sweep runs"),
+            ctl.action("sweep.stop", self.stop_btn, page=page,
+                       label="Stop sweep",
+                       disabled_hint="only while a sweep runs"),
+            ctl.action("sweep.to_zero", self.zero_btn, page=page,
+                       label="Ramp everything to zero and stop",
+                       help="Asks for confirmation: answers=['yes'].",
+                       disabled_hint="only while a sweep runs"),
+            ctl.action("sweep.load_preset", self.load_preset_btn, page=page,
+                       label="Load preset"),
+            ctl.action("sweep.save_preset", self.save_preset_btn, page=page,
+                       label="Save preset"),
+            ctl.text_field("sweep.condition", self.condition, page=page,
+                           label="Condition",
+                           help="Inequalities mask the measured region; one "
+                                "equality couples two axes. Aliases x/y/z."),
+            ctl.action("sweep.check_condition", self.check_condition_btn,
+                       page=page, label="Check / preview condition"),
+            ctl.multichoice("sweep.reads", self.reads_list, page=page,
+                            label="Read parameters",
+                            help="Channels recorded at every point, as "
+                                 "'address.option'."),
+            ctl.action("sweep.refresh_reads", self.refresh_reads_btn,
+                       page=page, label="Refresh read list"),
+            ctl.entry_text("sweep.filename", self.filename, page=page,
+                           label="Output filename",
+                           help="Empty = auto (YYMMDD-N, outer axis values "
+                                "embedded)."),
+            ctl.text_field("sweep.script", self.script, page=page,
+                           label="Per-point script",
+                           help="Runs after every measured point. Sees "
+                                "reads (the row just measured, keyed like "
+                                "the CSV columns), row, columns, walk, "
+                                "point, values, devices, engine, live, np, "
+                                "time, stop(), pause(), to_zero(). This is "
+                                "where a reading decides something. Runs "
+                                "arbitrary Python, so the lab profile can "
+                                "forbid it."),
+            ctl.action("sweep.load_script", self.load_script_btn, page=page,
+                       label="Load a per-point script",
+                       help="Needs a path: files=['/path/to/script.py']."),
+            ctl.action("sweep.save_script", self.save_script_btn, page=page,
+                       label="Save the per-point script",
+                       help="Needs a path: files=['/path/to/script.py']."),
+            ctl.action("sweep.clear_script", self.clear_script_btn,
+                       page=page, label="Clear the per-point script"),
+            ctl.readout("sweep.script_file",
+                        lambda: self.script_label.cget("text"), page=page,
+                        label="Script file"),
+            ctl.readout("sweep.running", lambda: bool(self.running),
+                        page=page, label="A sweep is running"),
+        ]
+        for card in self.axis_cards[: self.n_dims]:
+            out.extend(card.controls(page))
+        return out
 
     # ---------------- presets ------------------------------------------
     def _preset_file(self) -> str:

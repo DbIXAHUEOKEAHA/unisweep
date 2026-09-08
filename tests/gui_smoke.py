@@ -331,8 +331,152 @@ def lifecycle_check():
           f"closed {sorted(md.MockDevice.close_log)}")
 
 
+def control_surface_check():
+    """The agent control surface, against the REAL widgets.
+
+    Everything in tests/test_agent.py runs on duck-typed stand-ins because
+    the control layer never imports tkinter. This is the other half: it
+    proves that each name in a page's controls() is bound to a widget that
+    exists and behaves as the binder assumes — reading every control is
+    the part that catches a renamed attribute or a getter that raises.
+    """
+    appmod.DeviceRegistry = FakeRegistry
+    app = appmod.App("/tmp/uni_controls")
+    tk_errors = []
+    app.root.report_callback_exception = \
+        lambda et, ev_, tb: tk_errors.append((et.__name__, str(ev_)))
+
+    def pump(seconds=0.2):
+        t0 = time.time()
+        while time.time() - t0 < seconds:
+            app.root.update()
+            time.sleep(0.01)
+
+    pump(0.4)
+    if app._wizard is not None:
+        app._wizard._skip()
+    pump(0.2)
+
+    from unisweep.agent.controls import ControlError
+    from unisweep.agent.session import AgentSession
+    session = AgentSession(app)          # this thread owns the widgets
+
+    # ---- 1. every page contributes, and every control reads ----------
+    app.show_page("Devices")             # device rows are built on show
+    pump(0.3)
+    app.show_page("Sweep")
+    pump(0.2)
+    described = session.list_controls()["controls"]
+    names = {c["name"] for c in described}
+    for required in ("app.page", "app.agent_endpoint", "sweep.start",
+                     "sweep.dimensions", "sweep.axis1.start",
+                     "sweep.reads", "sweep.script", "sweep.load_script",
+                     "sweep.save_script", "sweep.script_file",
+                     "setget.row1.set", "setget.delay", "settings.theme",
+                     "settings.agent_enabled", "devices.scan"):
+        assert required in names, f"missing control: {required}"
+    pages = {c["page"] for c in described}
+    assert pages >= {"app", "sweep", "setget", "settings", "devices"}, \
+        f"a page contributed nothing: {sorted(pages)}"
+    broken = [(c["name"], c["error"]) for c in described if "error" in c]
+    assert not broken, f"controls whose value could not be read: {broken}"
+    assert len(described) > 60, f"only {len(described)} controls found"
+    assert any(n.endswith(".type") for n in names), "no device rows"
+
+    # ---- 2. typing into the fields -----------------------------------
+    session.set_controls({"sweep.dimensions": "2D"})
+    pump(0.2)
+    assert "sweep.axis2.start" in session.registry(), \
+        "switching to 2D must add the second axis card"
+    session.set_controls({
+        "sweep.axis1.device": "SMU",      # the bare address, not the label
+        "sweep.axis1.start": -1.0, "sweep.axis1.stop": 1.0,
+        "sweep.axis1.rate": 0.5, "sweep.axis1.delay": 0.01,
+        "sweep.axis1.mode": "step, units/pt", "sweep.axis1.walks": 2,
+        "sweep.axis1.snake": True,
+        "sweep.script": "pass  # smoke",
+        "sweep.filename": "smoke"})
+    pump(0.2)
+    values = session.read_controls(prefix="sweep.axis1")
+    assert values["sweep.axis1.start"] == -1.0
+    assert values["sweep.axis1.walks"] == 2
+    assert values["sweep.axis1.snake"] is True
+    assert values["sweep.axis1.parameter"] in ("Volt", "Curr"), \
+        "the parameter list must follow the chosen device"
+    try:
+        session.set_controls({"sweep.axis1.start": "banana"})
+        raise AssertionError("a non-number was accepted")
+    except ControlError:
+        pass
+
+    # ---- 3. a program round-trips through the page --------------------
+    session.set_controls({"sweep.dimensions": "1D",
+                          "sweep.reads": ["SMU.Volt"]})
+    pump(0.2)
+    program = session.get_program()
+    assert program["valid"], program["complaints"]
+    assert program["program"]["axes"][0]["device"] == "SMU"
+    preview = session.dry_run()
+    assert preview["ok"], preview
+    assert preview["planned_points"] > 1
+
+    # ---- 4. pressing buttons, dialogs answered from a script ----------
+    checked = session.press("sweep.check_condition")
+    pump(0.2)
+    assert checked["ok"], checked
+    # the script file buttons go through the GUI's own file dialogs
+    script_file = os.path.join("/tmp/uni_controls", "smoke_script.py")
+    saved = session.press("sweep.save_script", files=[script_file])
+    pump(0.2)
+    assert saved["ok"], saved
+    assert os.path.exists(script_file), "Save script wrote nothing"
+    session.set_controls({"sweep.script": ""})
+    loaded = session.press("sweep.load_script", files=[script_file])
+    pump(0.2)
+    assert loaded["ok"], loaded
+    assert "smoke" in session.read_controls(
+        ["sweep.script"])["sweep.script"]
+    assert session.read_controls(
+        ["sweep.script_file"])["sweep.script_file"] == "smoke_script.py"
+    unanswered = session.press("sweep.load_script")
+    assert unanswered["ok"] is False, "a file dialog must ask, not guess"
+    try:
+        session.press("sweep.stop")       # greyed out with no sweep
+        raise AssertionError("a disabled button was pressed")
+    except ControlError as exc:
+        assert "greyed out" in str(exc)
+
+    # ---- 5. run one short sweep the way an assistant would -----------
+    started = session.run_sweep({
+        "axes": [{"device": "SMU", "parameter": "Volt", "start": 0.0,
+                  "stop": 0.4, "rate": 0.1, "delay": 0.01,
+                  "count_mode": "step"}],
+        "reads": ["SMU.Volt"]})
+    assert started["started"], started
+    for _ in range(200):
+        pump(0.05)
+        if app.event_tap.state == "finished":
+            break
+    assert app.event_tap.state == "finished", session.status()
+    assert session.status()["finished"]["points"] == 5
+
+    # ---- 6. the endpoint starts and stops -----------------------------
+    assert app.start_agent_endpoint(), app.agent_summary()
+    assert app.agent_service.port > 0
+    assert "listening" not in app.agent_summary()
+    app.stop_agent_endpoint()
+    assert app.agent_service is None
+
+    app._on_close()
+    assert not tk_errors, tk_errors
+    print(f"CONTROL SURFACE OK — {len(described)} controls across "
+          f"{len(pages)} pages")
+
+
 if __name__ == "__main__":
     import shutil
     shutil.rmtree("/tmp/uni_coldstart", ignore_errors=True)
+    shutil.rmtree("/tmp/uni_controls", ignore_errors=True)
     main()
     lifecycle_check()
+    control_surface_check()

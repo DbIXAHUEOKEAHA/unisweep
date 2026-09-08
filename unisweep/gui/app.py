@@ -22,9 +22,14 @@ from ..core.config import LiveProgram, SweepProgram
 from ..core.catalog import DriverCatalog
 from ..core.devices import DeviceRegistry
 from ..core.engine import SweepEngine
+from ..agent.tap import EventTap
+from ..core.labprofile import LabProfile
+from ..core.limits import LimitPolicy
 from ..core.livedata import LiveData, LiveMaps
 from ..core.notify import TelegramNotifier, compose_sweep_message
 from ..core.settings import AppSettings
+from ..core.telegram_link import (DEFAULT_SERVICE_URL, TelegramLink,
+                                  new_rig_identity)
 from .devices_page import DevicesPage
 from .plot_panel import PlotManager
 from .setget_page import SetGetPage
@@ -52,14 +57,35 @@ class App:
 
         self.registry = DeviceRegistry(core_dir)
         self.catalog = DriverCatalog(core_dir)
+        # config/lab_profile.json describes what the instruments mean and
+        # what they may not do; without one the policy is unbounded and
+        # the application behaves exactly as it did before.
+        self.profile = LabProfile.empty()
+        self.profile_problems: list = []
+        self.reload_profile()
         self.apply_settings()
         self.event_queue: "queue.Queue" = queue.Queue()
+        # everything the engine emits is also kept here, bounded, so an
+        # assistant can ask what happened without the GUI having to
+        # remember it or the model having to read every point
+        self.event_tap = EventTap()
         self.live_data = LiveData()
         self.live_maps = LiveMaps()
         self.setget_data = LiveData()
         self.engine: SweepEngine | None = None
         self.live: LiveProgram | None = None
         self._paused = False
+        self.agent_service = None
+        self.agent_error = ""
+        # the Telegram link is created once and reconfigured in place, so
+        # a settings edit mid-sweep cannot lose its queued notifications
+        self.tg_link = TelegramLink(
+            live_data=self.live_data, live_maps=self.live_maps,
+            program_getter=lambda: self.live.get() if self.live else None,
+            status_cb=lambda text, state: self.event_queue.put(
+                ("tg_status", text, state)),
+            command_cb=lambda cid, kind: self.event_queue.put(
+                ("tg_command", cid, kind)))
 
         # ---- layout ---------------------------------------------------
         self.root.columnconfigure(1, weight=1, minsize=700)
@@ -161,6 +187,54 @@ class App:
         self.root.after(300, self._maybe_run_setup)
         self.root.after(1200, lambda: self.refresh_catalog_async())
 
+    # ---------------- assistant endpoint --------------------------------
+    def start_agent_endpoint(self) -> bool:
+        """Serve the MCP endpoint from inside this process.
+
+        Deliberately in-process: this application owns the instrument
+        sessions, so an assistant has to come here rather than open its
+        own. See unisweep/agent/service.py.
+        """
+        if self.agent_service is not None and self.agent_service.running:
+            return True
+        from ..agent.service import AgentService, new_token
+        from ..agent.session import AgentSession
+        if not self.settings.agent_token:
+            self.settings.agent_token = new_token()
+            self.settings.save(self.core_dir)
+        service = AgentService(
+            AgentSession(self), self.core_dir,
+            port=int(self.settings.agent_port or 0),
+            token=self.settings.agent_token,
+            log=lambda line: self.event_queue.put(("agent_log", line)))
+        try:
+            service.start_listening()
+        except OSError as exc:
+            self.agent_service = None
+            self.agent_error = str(exc)
+            self.status(f"Agent endpoint could not start: {exc}")
+            return False
+        self.agent_error = ""
+        self.agent_service = service
+        self.status(self.agent_summary())
+        return True
+
+    def stop_agent_endpoint(self) -> None:
+        if self.agent_service is not None:
+            self.agent_service.stop()
+            self.agent_service = None
+
+    def agent_summary(self) -> str:
+        if self.agent_service is None or not self.agent_service.running:
+            return (f"agent endpoint off{(' — ' + self.agent_error) if self.agent_error else ''}")
+        return (f"agent endpoint on 127.0.0.1:{self.agent_service.port}, "
+                f"{self.agent_service.clients} client(s) connected")
+
+    def agent_command(self) -> str:
+        """The command line to give a desktop MCP client."""
+        import sys as _sys
+        return f'"{_sys.executable}" -m unisweep.agent.stdio --core-dir "{self.core_dir}"'
+
     # ---------------- driver catalog auto-update -----------------------
     def refresh_catalog_async(self, manual: bool = False):
         """Discover new drivers on GitHub in the background.
@@ -179,6 +253,13 @@ class App:
 
     # ---------------- first-run setup ----------------------------------
     def _maybe_run_setup(self):
+        if self.settings.agent_enabled:
+            self.start_agent_endpoint()
+        # monitoring that has to be switched on again after every restart
+        # is monitoring that will be off on the night it was needed
+        if self.settings.tg_mode == "service" and self.settings.tg_enabled:
+            self._configure_telegram()
+            self.tg_link.start()
         from .setup_wizard import SetupWizard, setup_done
         assigned = {a: t for a, t in self.registry.types.items()
                     if a != "Time"}
@@ -255,7 +336,10 @@ class App:
 
     def _notify_sweep_end(self, event) -> None:
         st = self.settings
-        if not st.tg_enabled:
+        # In 'service' mode the sweep-end message is produced by the link
+        # (with the plot attached, and to everyone linked to this rig), so
+        # sending one from here as well would simply duplicate it.
+        if st.tg_mode != "bot" or not st.tg_enabled:
             return
         stopped = bool(getattr(event, "stopped", False))
         if stopped and not st.tg_on_error and self._run_fatal:
@@ -381,6 +465,41 @@ class App:
         import threading as _th
         _th.Thread(target=work, daemon=True).start()
 
+    def reload_profile(self):
+        """Re-read config/lab_profile.* and re-arm the safety envelope.
+
+        The policy is pushed onto the registry, which forwards it to the
+        instruments already connected — reloading must never leave a live
+        adapter running under the previous limits.
+        """
+        self.profile = LabProfile.load(self.core_dir)
+        policy = LimitPolicy(self.profile)
+        # a custom/test registry may predate set_policy; install the policy
+        # either way rather than leaving the rig silently unprotected
+        setter = getattr(self.registry, "set_policy", None)
+        if callable(setter):
+            setter(policy)
+        else:
+            self.registry.policy = policy
+        try:
+            self.profile_problems = self.profile.validate(self.registry)
+        except Exception:                          # noqa: BLE001
+            self.profile_problems = []
+        return self.profile
+
+    def profile_summary(self) -> str:
+        """One line for the status strip."""
+        if self.profile.is_empty:
+            return "no lab profile — instrument limits are not enforced"
+        errors = sum(1 for p in self.profile_problems if p.level == "error")
+        warnings = len(self.profile_problems) - errors
+        name = self.profile.lab or os.path.basename(self.profile.path)
+        text = (f"lab profile '{name}': {len(self.profile.devices)} "
+                f"instrument(s), tier {self.profile.autonomy}")
+        if errors or warnings:
+            text += f" — {errors} error(s), {warnings} warning(s)"
+        return text
+
     def apply_settings(self):
         """Push app-wide settings where they act immediately."""
         if hasattr(self, "plots"):        # __init__ calls this early
@@ -389,6 +508,146 @@ class App:
         from ..core.engine import SweepEngine
         SweepEngine.STALL_WARN_S = float(self.settings.stall_warn_s)
         SweepEngine.STALL_ABORT_S = float(self.settings.stall_abort_s)
+        if hasattr(self, "tg_link"):
+            self._configure_telegram()
+
+    # ---------------- telegram monitoring -------------------------------
+    def _configure_telegram(self):
+        """Hand the link the current settings.  Safe at any time — the
+        link picks the new configuration up on its next cycle."""
+        st = self.settings
+        self.tg_link.configure(
+            service_url=st.tg_service_url or DEFAULT_SERVICE_URL,
+            rig_id=st.tg_rig_id, rig_token=st.tg_rig_token,
+            rig_name=st.tg_rig_name or self._default_rig_name(),
+            allow_control=st.tg_allow_control,
+            push_s=st.tg_push_s, snapshot_s=st.tg_snapshot_s)
+
+    @staticmethod
+    def _default_rig_name() -> str:
+        import socket
+        try:
+            return socket.gethostname()[:64] or "Unisweep"
+        except Exception:                              # noqa: BLE001
+            return "Unisweep"
+
+    def start_telegram_link(self) -> bool:
+        """The Settings page's 'Start monitoring' button.
+
+        The rig identity is minted here, once, and kept in
+        ``config/settings.json``: it is this installation's only credential
+        and it is what lets the service recognise the same rig again after
+        a reinstall of the bot or a restart of the database.
+        """
+        st = self.settings
+        if not st.tg_rig_id or not st.tg_rig_token:
+            st.tg_rig_id, st.tg_rig_token = new_rig_identity()
+        if not st.tg_rig_name:
+            st.tg_rig_name = self._default_rig_name()
+        st.tg_mode = "service"
+        st.tg_enabled = True
+        st.save(self.core_dir)
+        self._configure_telegram()
+        ok = self.tg_link.start()
+        self.status(self.telegram_summary())
+        return ok
+
+    def stop_telegram_link(self) -> None:
+        self.settings.tg_enabled = False
+        self.settings.save(self.core_dir)
+        self.tg_link.stop()
+        self.status("Telegram monitoring stopped")
+
+    def telegram_running(self) -> bool:
+        return bool(self.settings.tg_mode == "service"
+                    and self.settings.tg_enabled and self.tg_link.enabled)
+
+    def telegram_summary(self) -> str:
+        if self.settings.tg_mode != "service":
+            return ("using a private bot — a message when a sweep ends, "
+                    "nothing else")
+        if not self.settings.tg_enabled:
+            return "not reporting"
+        return self.tg_link.summary()
+
+    def telegram_users_summary(self) -> str:
+        """Who the bot will write to about this setup."""
+        links = list(getattr(self.tg_link, "links", []))
+        if not links:
+            return "nobody linked"
+        return ", ".join(f"{e.get('chat_id')} "
+                         f"({e.get('title') or 'unnamed'})" for e in links)
+
+    def telegram_pairing_code(self) -> dict:
+        """Mint a code for the Settings page to show.
+
+        Blocking on purpose: somebody is standing in front of the screen
+        waiting for six digits, and an answer that arrives later through
+        the event queue would be worse than a two-second wait.
+        """
+        st = self.settings
+        if not st.tg_rig_id or not st.tg_rig_token:
+            st.tg_rig_id, st.tg_rig_token = new_rig_identity()
+            st.save(self.core_dir)
+        self._configure_telegram()
+        return self.tg_link.request_code()
+
+    def telegram_remove_user(self, chat_id) -> bool:
+        """Cut one Telegram account off from this rig."""
+        ok = self.tg_link.remove_link(chat_id)
+        self.status(f"Telegram: {chat_id} removed" if ok
+                    else f"Telegram: could not remove {chat_id}")
+        return ok
+
+    def telegram_refresh_links(self) -> None:
+        """Re-read the roster without waiting for the next heartbeat."""
+        def work():
+            try:
+                self.tg_link.refresh_links()
+            except Exception:                          # noqa: BLE001
+                pass
+        import threading as _th
+        _th.Thread(target=work, daemon=True).start()
+
+    def _telegram_command(self, command_id, kind: str) -> None:
+        """Run a command the bot sent, on the GUI thread.
+
+        These are the same three actions as the buttons on the Sweep page,
+        and nothing else: the bot can stop a sweep, it can never set a
+        value.  The outcome goes back to whoever pressed the button.
+        """
+        ok, detail = False, ""
+        try:
+            running = self.engine is not None and self.engine.is_alive()
+            if kind in ("pause", "resume"):
+                if not running:
+                    detail = "no sweep is running"
+                elif (kind == "pause") == self._paused:
+                    ok, detail = True, ("already paused" if self._paused
+                                        else "already running")
+                else:
+                    self.toggle_pause()
+                    ok = True
+                    detail = "paused" if self._paused else "resumed"
+            elif kind == "stop":
+                if not running:
+                    detail = "no sweep is running"
+                else:
+                    self.stop_sweep()
+                    ok, detail = True, "stopping"
+            elif kind == "to_zero":
+                if not running:
+                    detail = "no sweep is running"
+                else:
+                    self.to_zero()
+                    ok, detail = True, "stopping and ramping to zero"
+            else:
+                detail = f"unknown command '{kind}'"
+        except Exception as exc:                       # noqa: BLE001
+            detail = f"{type(exc).__name__}: {exc}"
+        if command_id is not None:
+            self.tg_link.report_result(command_id, ok, detail)
+        self.status(f"Telegram: {kind} — {detail}")
 
     # ---------------- navigation --------------------------------------
     def _active_plots(self):
@@ -415,6 +674,46 @@ class App:
             page.grid_forget()
         self.pages[name].grid(row=0, column=0, sticky="nsew")
 
+    # ---------------- agent control surface -----------------------------
+    def controls(self) -> list:
+        """Every named handle in the application, page by page.
+
+        Built fresh on each call, because the set is genuinely dynamic:
+        axis cards appear with the dimension count, device rows appear as
+        addresses are found. What an assistant can reach is exactly what a
+        person can currently see — no more, and no less.
+        """
+        from ..agent import controls as ctl
+        out = [
+            ctl.selection("app.page", lambda: self._current_page,
+                          self.show_page, lambda: list(self.pages),
+                          page="app", label="Visible page",
+                          help="Which page is on screen. Controls on the "
+                               "other pages still work; this only changes "
+                               "what is displayed."),
+            ctl.readout("app.status",
+                        lambda: self.message_label.cget("text"),
+                        page="app", label="Status line"),
+            ctl.readout("app.sweep_state",
+                        lambda: self.state_label.cget("text"),
+                        page="app", label="Sweep state"),
+            ctl.readout("app.lab_profile", self.profile_summary,
+                        page="app", label="Lab profile"),
+            ctl.readout("app.agent_endpoint", self.agent_summary,
+                        page="app", label="Assistant endpoint"),
+        ]
+        for name, page in self.pages.items():
+            builder = getattr(page, "controls", None)
+            if builder is None:
+                continue
+            try:
+                out.extend(builder())
+            except Exception as exc:               # noqa: BLE001
+                # one broken page must not hide every other control
+                print(f"[unisweep] controls() failed for {name}: "
+                      f"{type(exc).__name__}: {exc}")
+        return out
+
     def on_devices_changed(self):
         self.pages["Sweep"].refresh_reads()
         self.pages["Set & Get"].refresh_reads()
@@ -432,7 +731,7 @@ class App:
         self.live = LiveProgram(program)
         self.live_data.reset(columns=(), dimensions=program.dimensions)
         self.engine = SweepEngine(self.live, self.registry, self.core_dir,
-                                  self.event_queue)
+                                  self.event_queue, profile=self.profile)
         self._paused = False
         self.engine.start()
         self.led.set(PALETTE["green"])
@@ -464,6 +763,11 @@ class App:
                     event = self.event_queue.get_nowait()
                 except queue.Empty:
                     break
+                self.event_tap.record(event)
+                if not isinstance(event, tuple):
+                    # the Telegram link only ever appends to a deque here;
+                    # every socket it uses lives on its own thread
+                    self.tg_link.on_event(event)
                 try:
                     self._handle(event)
                 except tk.TclError:
@@ -504,6 +808,17 @@ class App:
                 return
             if event[0] == "notify_result":
                 self.status(event[1])
+                return
+            if event[0] == "tg_status":
+                page = self.pages.get("Settings")
+                if page is not None and hasattr(page,
+                                                "refresh_telegram_status"):
+                    page.refresh_telegram_status()
+                if event[2] in ("error", "pending"):
+                    self.status(f"Telegram: {event[1]}")
+                return
+            if event[0] == "tg_command":
+                self._telegram_command(event[1], event[2])
                 return
             if event[0] == "setget_row":
                 self.pages["Set & Get"].show_row(event[1], event[2])
@@ -633,6 +948,10 @@ class App:
                 self.root.after_cancel(self._pump_id)
         except tk.TclError:
             pass
+        self.stop_agent_endpoint()
+        # a last heartbeat is worth waiting a moment for: it is what stops
+        # the server announcing "the rig went silent" after a clean quit
+        self.tg_link.stop(join=2.0)
         self.plots.shutdown()
         self.setget_plots.shutdown()
         # every instrument whose library has close() gets it called

@@ -122,6 +122,39 @@ class DeviceRow:
             self.status.configure(text="driver installed")
             self.install_btn.grid_remove()
 
+    def controls(self, page: str = "devices") -> list:
+        """Named handles for this instrument's row."""
+        from ..agent import controls as ctl
+        from ..core.labprofile import channel_ident
+        p = f"devices.{channel_ident(self.address)}"
+        addr = self.address
+        return [
+            ctl.readout(f"{p}.address", lambda: addr, page=page,
+                        label=f"{addr} · Address"),
+            ctl.choice(f"{p}.type", self.combo, page=page,
+                       label=f"{addr} · Instrument type",
+                       after_set=self._assigned,
+                       help="Which driver answers on this address. "
+                            "Entries marked with an arrow are downloaded "
+                            "on Install."),
+            ctl.readout(f"{p}.status",
+                        lambda: self.status.cget("text"), page=page,
+                        label=f"{addr} · Status"),
+            ctl.action(f"{p}.install", self.install_btn, page=page,
+                       label=f"{addr} · Install driver",
+                       help="Fetch the driver file and pip-install its "
+                            "dependencies."),
+            ctl.action(f"{p}.test", self.test_btn, page=page,
+                       label=f"{addr} · Test connection",
+                       help="Open the instrument and read its identity. "
+                            "The result lands in the row status a moment "
+                            "later — read it back afterwards."),
+            ctl.action(f"{p}.sweep_test", self.sweep_btn, page=page,
+                       label=f"{addr} · Sweep-capability test",
+                       help="MOVES THE INSTRUMENT: opens a dialog that "
+                            "asks for an explicit target."),
+        ]
+
     @staticmethod
     def _short(text: str, n: int = 42) -> str:
         return text if len(text) <= n else text[: n - 1] + "…"
@@ -221,8 +254,8 @@ class DevicesPage(ttk.Frame):
                                        allow_empty=True, width=18)
         self.new_addr.pack(side="left")
         self.new_addr.bind("<Return>", lambda e: self._add())
-        ttk.Button(bar, text="Add", command=self._add).pack(side="left",
-                                                            padx=4)
+        self.add_btn = ttk.Button(bar, text="Add", command=self._add)
+        self.add_btn.pack(side="left", padx=4)
         wiz_btn = ttk.Button(bar, text="Wizard…",
                              command=self.app.open_setup_wizard)
         wiz_btn.pack(side="right")
@@ -275,6 +308,30 @@ class DevicesPage(ttk.Frame):
             pass
 
     # ---------------- catalog labels ----------------------------------
+    def controls(self) -> list:
+        """Named handles for the Devices page, one group per address."""
+        from ..agent import controls as ctl
+        page = "devices"
+        out = [
+            ctl.action("devices.scan", self.scan_btn, page=page,
+                       label="Scan VISA + serial"),
+            ctl.action("devices.update_catalog", self.update_btn, page=page,
+                       label="Update the driver catalog"),
+            ctl.entry_text("devices.new_address", self.new_addr, page=page,
+                           label="New address to add",
+                           help="Type an address here, then press "
+                                "devices.add — for network instruments "
+                                "that no VISA scan finds."),
+            ctl.action("devices.add", self.add_btn, page=page,
+                       label="Add the typed address"),
+            ctl.readout("devices.log",
+                        lambda: self.log_widget.get("1.0", "end").strip(),
+                        page=page, label="Devices log"),
+        ]
+        for address in sorted(self.rows):
+            out.extend(self.rows[address].controls(page))
+        return out
+
     def driver_labels(self) -> list[str]:
         self._label_to_name.clear()
         labels = []

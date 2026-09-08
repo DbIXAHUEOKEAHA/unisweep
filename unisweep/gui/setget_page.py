@@ -43,6 +43,32 @@ class SetRow:
     def address(self) -> str:
         return self.page.registry.address_from_display(self.device.get())
 
+    def controls(self, index: int, page: str = "setget") -> list:
+        from ..agent import controls as ctl
+        p = f"setget.row{index}"
+        return [
+            ctl.choice(f"{p}.device", self.device, page=page,
+                       label=f"Set row {index} · Device",
+                       after_set=self._device_changed),
+            ctl.choice(f"{p}.parameter", self.parameter, page=page,
+                       label=f"Set row {index} · Parameter"),
+            ctl.number(f"{p}.value", self.value, page=page,
+                       label=f"Set row {index} · Value", allow_empty=True),
+            ctl.number(f"{p}.speed", self.speed, page=page,
+                       label=f"Set row {index} · Speed", allow_empty=True,
+                       help="Ramp rate for instruments that ramp "
+                            "themselves; empty = the driver's default."),
+            ctl.action(f"{p}.set", self.btn, page=page,
+                       label=f"Set row {index} · Set",
+                       help="Applies the value through the same limit "
+                            "policy the sweep engine uses. The outcome "
+                            "lands in the row's status, which arrives one "
+                            "moment later — read it back afterwards."),
+            ctl.readout(f"{p}.status",
+                        lambda: self.result.cget("text"), page=page,
+                        label=f"Set row {index} · Result"),
+        ]
+
     def _device_changed(self, _=None):
         opts = self.page.registry.set_options(self.address())
         self.parameter.configure(values=opts or [""])
@@ -102,8 +128,9 @@ class SetGetPage(ttk.Frame):
         self.reads_list.configure(yscrollcommand=vsb.set)
         bar = ttk.Frame(get_card, style="Card.TFrame")
         bar.grid(row=2, column=0, columnspan=5, sticky="ew", pady=(8, 0))
-        ttk.Button(bar, text="Refresh list",
-                   command=self.refresh_reads).pack(side="left")
+        self.refresh_reads_btn = ttk.Button(bar, text="Refresh list",
+                                            command=self.refresh_reads)
+        self.refresh_reads_btn.pack(side="left")
         ttk.Label(bar, text="Delay, s:", style="Muted.TLabel").pack(
             side="left", padx=(14, 4))
         self.delay = ValidatedEntry(bar, 1.0, width=6)
@@ -130,6 +157,32 @@ class SetGetPage(ttk.Frame):
             self.reads_list.insert("end", name)
         for row in self.rows:
             row.device.configure(values=self.registry.display_list())
+
+    def controls(self) -> list:
+        """Named handles for the Set & Get page."""
+        from ..agent import controls as ctl
+        page = "setget"
+        out = [
+            ctl.multichoice("setget.reads", self.reads_list, page=page,
+                            label="Monitored parameters",
+                            help="Channels the monitor logs, as "
+                                 "'address.option'."),
+            ctl.action("setget.refresh_reads", self.refresh_reads_btn,
+                       page=page, label="Refresh monitored list"),
+            ctl.number("setget.delay", self.delay, page=page, unit="s",
+                       label="Monitor delay"),
+            ctl.action("setget.start", self.start_btn, page=page,
+                       label="Start monitor"),
+            ctl.action("setget.stop", self.stop_btn, page=page,
+                       label="Stop monitor",
+                       disabled_hint="only while the monitor runs"),
+            ctl.readout("setget.latest",
+                        lambda: self.live_label.cget("text"), page=page,
+                        label="Latest monitor reading"),
+        ]
+        for index, row in enumerate(self.rows, start=1):
+            out.extend(row.controls(index, page))
+        return out
 
     def _start(self):
         reads = [self.reads_list.get(i)

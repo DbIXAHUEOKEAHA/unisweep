@@ -1,0 +1,164 @@
+{
+  "version": 1,
+  "lab": "electronic transport — hBN-encapsulated graphene Hall bar",
+  "notes": "TEMPLATE. Copy to config/lab_profile.json, then replace every address and CHECK EVERY LIMIT against your own device. A wrong limit is worse than no limit: it buys confidence you have not earned. To react to a measured value (a leakage runaway, a resistance turning over), use the per-point script on the sweep page — see docs/LAB_PROFILE.md.",
+  "autonomy": "bounded",
+  "sample": {
+    "id": "GR-2026-09-A",
+    "material": "monolayer graphene, hBN encapsulated, graphite back gate",
+    "geometry": "Hall bar, W = 2 um, L = 6 um",
+    "contacts": "Vxx across the XX pair, Vxy across the XY pair, current-biased source-drain"
+  },
+  "constants": {
+    "I_ac": 1e-07,
+    "R_series": 10000000.0,
+    "h_over_e2": 25812.80745
+  },
+  "devices": {
+    "GPIB0::4::INSTR": {
+      "alias": "gate",
+      "driver": "keithley_series_2600b",
+      "role": "back-gate source-measure unit, channel A",
+      "notes": "channel A drives the graphite back gate; channel B unused",
+      "parameters": {
+        "A_source_voltage": {
+          "alias": "Vbg",
+          "unit": "V",
+          "quantity": "back gate voltage",
+          "min": -8.0,
+          "max": 8.0,
+          "max_rate": 0.5,
+          "max_step": 0.1,
+          "safe_value": 0.0,
+          "notes": "CHECK: set min/max from the leakage onset YOU measured on this device, not from the SMU's range"
+        },
+        "A_current": {
+          "alias": "Ileak",
+          "unit": "A",
+          "quantity": "gate leakage current",
+          "settable": false
+        },
+        "A_compl_current": {
+          "alias": "Icompl",
+          "unit": "A",
+          "quantity": "gate current compliance",
+          "min": 0.0,
+          "max": 1e-07
+        }
+      }
+    },
+    "192.168.0.100:5000": {
+      "alias": "cryostat",
+      "driver": "opticool",
+      "role": "Quantum Design OptiCool — temperature and magnetic field",
+      "notes": "field is reported in oersted; 1 T = 10000 Oe",
+      "parameters": {
+        "T_sample": {
+          "alias": "T",
+          "unit": "K",
+          "quantity": "sample temperature",
+          "min": 1.7,
+          "max": 320.0,
+          "max_rate": 5.0,
+          "safe_value": 1.7
+        },
+        "Field": {
+          "alias": "B",
+          "unit": "Oe",
+          "quantity": "magnetic field",
+          "min": -90000.0,
+          "max": 90000.0,
+          "max_rate": 100.0,
+          "safe_value": 0.0
+        }
+      }
+    },
+    "GPIB0::1::INSTR": {
+      "alias": "lockin_xx",
+      "driver": "sr830",
+      "role": "longitudinal voltage across the XX contact pair",
+      "notes": "reference locked to the current-bias oscillator; I_ac set by amplitude / R_series",
+      "parameters": {
+        "x": {
+          "alias": "Vxx",
+          "unit": "V",
+          "quantity": "in-phase longitudinal voltage",
+          "settable": false
+        },
+        "y": {
+          "alias": "Vxx_q",
+          "unit": "V",
+          "quantity": "quadrature longitudinal voltage",
+          "settable": false
+        },
+        "frequency": {
+          "alias": "f_ref",
+          "unit": "Hz",
+          "quantity": "lock-in reference frequency",
+          "min": 1.0,
+          "max": 1000.0
+        },
+        "amplitude": {
+          "alias": "V_drive",
+          "unit": "V",
+          "quantity": "oscillator amplitude driving the current bias",
+          "min": 0.0,
+          "max": 2.0
+        }
+      }
+    },
+    "GPIB0::2::INSTR": {
+      "alias": "lockin_xy",
+      "driver": "sr830",
+      "role": "transverse (Hall) voltage across the XY contact pair",
+      "parameters": {
+        "x": {
+          "alias": "Vxy",
+          "unit": "V",
+          "quantity": "in-phase Hall voltage",
+          "settable": false
+        },
+        "y": {
+          "alias": "Vxy_q",
+          "unit": "V",
+          "quantity": "quadrature Hall voltage",
+          "settable": false
+        }
+      }
+    }
+  },
+  "derived": {
+    "Rxx": {
+      "expression": "Vxx / I_ac",
+      "unit": "ohm",
+      "quantity": "longitudinal resistance"
+    },
+    "Rxy": {
+      "expression": "Vxy / I_ac",
+      "unit": "ohm",
+      "quantity": "Hall resistance"
+    },
+    "B_tesla": {
+      "expression": "B / 10000",
+      "unit": "T",
+      "quantity": "magnetic field in tesla"
+    },
+    "Ileak_pA": {
+      "expression": "Ileak * 1e12",
+      "unit": "pA",
+      "quantity": "gate leakage in picoamps"
+    }
+  },
+  "interlocks": {
+    "max_points": 500000,
+    "max_duration_s": 172800,
+    "exclusive_ramps": [
+      [
+        "B",
+        "T"
+      ]
+    ],
+    "require_preflight": true,
+    "allow_script": true
+  }
+}

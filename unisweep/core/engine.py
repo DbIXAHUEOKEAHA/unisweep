@@ -18,6 +18,10 @@ Key properties
   half-step tolerance from the *current* instructions; coupled equalities are
   solved per step with a warm-started Newton iteration. Nothing is computed
   in a race with the thread start.
+* **Reacting to what was measured** — the per-point script sees the row that
+  was just written (``reads``, ``row``, ``columns``) alongside ``stop()``,
+  ``to_zero()`` and the live program, so an abort condition on a measured
+  value is a couple of lines of Python rather than a subsystem.
 
 Loop topology (legacy-compatible)
 ---------------------------------
@@ -41,11 +45,12 @@ import numpy as np
 from .condition import ConditionError, ConditionSet
 from .config import LiveProgram
 from .devices import DeviceRegistry, DriverAdapter
-from .events import (
-    ApproachStarted,
-    ApproachFinished,AxisStepped, FileOpened, MapRowCommitted, PointMeasured,
+from .events import (ApproachStarted, ApproachFinished, AxisStepped,
+                     FileOpened, MapRowCommitted, PointMeasured,
                      PointSkipped, Progress, SweepError, SweepFinished,
                      SweepPaused, SweepResumed, SweepStarted, WalkFinished)
+from .labprofile import LabProfile
+from .limits import validate_program
 from .maps import MapWriter
 from .runner import AxisRunner
 from .writer import DataWriter
@@ -100,12 +105,21 @@ class _Stopped(Exception):
 class SweepEngine(threading.Thread):
 
     def __init__(self, live: LiveProgram, registry: DeviceRegistry,
-                 core_dir: str, out_queue: "queue.Queue"):
+                 core_dir: str, out_queue: "queue.Queue", profile=None):
         super().__init__(daemon=True, name="unisweep-engine")
         self.live = live
         self.registry = registry
         self.core_dir = core_dir
         self.q = out_queue
+        # The lab profile supplies the pre-flight envelope and the names
+        # used in messages. It is taken from the registry's policy when
+        # not passed explicitly, so the engine, the Devices page and any
+        # agent are always bounded by the same file. Absent a profile this
+        # is the empty one and nothing below changes behaviour.
+        if profile is None:
+            policy = getattr(registry, "policy", None)
+            profile = getattr(policy, "profile", None)
+        self.profile = profile or LabProfile.empty()
 
         self.pause_ev = threading.Event()
         self.stop_ev = threading.Event()
@@ -129,6 +143,8 @@ class SweepEngine(threading.Thread):
         self._script_errors: set[str] = set()
         self._read_errors: set[str] = set()
         self._nan_warned: set[str] = set()
+        self._last_reads: list = []
+        self._last_row: tuple = ()
 
         self._points_done = 0
         self._durations: deque[float] = deque(maxlen=25)
@@ -202,6 +218,32 @@ class SweepEngine(threading.Thread):
             if (new.coupled is None) == (self._condition.coupled is None):
                 self._condition = new
 
+    # ---------------- pre-flight ----------------------------------------
+    def _preflight(self) -> bool:
+        """Refuse a program the lab profile forbids, before any instrument
+        is touched. With no profile there is nothing to refuse, so an
+        installation without one behaves exactly as before."""
+        if self.profile.is_empty:
+            return True
+        try:
+            problems = validate_program(self.live.get(), self.profile,
+                                        self.registry)
+        except Exception as exc:                  # noqa: BLE001
+            self._error("preflight", exc)
+            return True
+        errors = [p for p in problems if p.level == "error"]
+        for problem in problems:
+            if problem.level != "error":
+                self._emit(SweepError(where=f"preflight/{problem.where}",
+                                      message=problem.message))
+        if not errors:
+            return True
+        detail = "; ".join(f"{p.where}: {p.message}" for p in errors)
+        self._emit(SweepError(
+            where="preflight", fatal=True, crucial=True,
+            message=f"the lab profile refuses this sweep — {detail}"))
+        return False
+
     def _tolerances(self) -> dict[str, float]:
         return {f"ax{i + 1}": self.runners[i].local_step()
                 for i in range(self.dims)}
@@ -274,7 +316,8 @@ class SweepEngine(threading.Thread):
                 else None
             for v in np.linspace(current, 0.0, 10):
                 try:
-                    adapter.set(ax.parameter, float(v), speed=speed)
+                    adapter.set(ax.parameter, float(v), speed=speed,
+                                safety=True)
                 except Exception as exc:          # noqa: BLE001
                     self._error("to-zero", exc)
                     break
@@ -315,6 +358,7 @@ class SweepEngine(threading.Thread):
 
     def _record_point(self) -> None:
         row = self._measure_row()
+        self._last_row = row
         self._writer.write(row)
         if self._map is not None:
             self._map.add_point(self.axis_values[self._loop_axes[-1]],
@@ -357,8 +401,22 @@ class SweepEngine(threading.Thread):
             "point": {f"ax{i + 1}": self.axis_values[i]
                       for i in range(self.dims)},
             "values": list(self.axis_values),
+            # what was just MEASURED, keyed exactly like the CSV columns.
+            # This is what lets a script react to a reading rather than
+            # only to a setpoint — "stop when the leakage runs away" is
+            #     if abs(reads["GPIB4.A_current"]) > 2e-9: stop()
+            # and pulling a range in instead of ending the run is
+            #     engine.live.update_axis(0, stop=values[0])
+            "reads": dict(zip(self.reads, self._last_reads)),
+            "row": tuple(self._last_row),
+            "columns": self.columns,
+            "walk": self._inner_walk_no,
             "devices": {a.address: a for a in self._adapters if a},
             "engine": self,
+            "live": self.live,
+            "stop": self.stop,
+            "pause": lambda: self.set_paused(True),
+            "to_zero": self.to_zero,
         }
         try:
             exec(self._script_code, ns)           # noqa: S102 - user feature
@@ -367,10 +425,12 @@ class SweepEngine(threading.Thread):
 
     # ---------------- axis application ---------------------------------
     def _apply_axis(self, i: int, value: float,
-                    speed: Optional[float] = None) -> None:
+                    speed: Optional[float] = None,
+                    safety: bool = False) -> None:
         ax = self.live.axis(i)
         try:
-            self._adapters[i].set(ax.parameter, float(value), speed=speed)
+            self._adapters[i].set(ax.parameter, float(value), speed=speed,
+                                  safety=safety)
         except Exception as exc:                  # noqa: BLE001
             raise _AxisFault(
                 f"{ax.device}.{ax.parameter}: setting the value failed "
@@ -1041,6 +1101,9 @@ class SweepEngine(threading.Thread):
     def run(self) -> None:
         stopped = False
         try:
+            if not self._preflight():
+                stopped = True
+                return
             self._resolve_devices()
             self.columns = self._build_columns()
             prog = self.live.get()

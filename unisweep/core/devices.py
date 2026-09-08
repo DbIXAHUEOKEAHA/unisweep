@@ -57,11 +57,24 @@ class VirtualTime:
 
 # ---------------------------------------------------------------------------
 class DriverAdapter:
-    """Uniform facade over a legacy driver instance."""
+    """Uniform facade over a legacy driver instance.
 
-    def __init__(self, address: str, instance):
+    When a :class:`~unisweep.core.limits.LimitPolicy` is attached (the
+    registry does that from the lab profile), every ``set`` passes through
+    it first. That is deliberately placed here rather than in the engine:
+    the Devices page's Test button, a per-point script and an automation
+    agent all reach the hardware through this one method, so this is the
+    only place a safety envelope cannot be walked around.
+    """
+
+    def __init__(self, address: str, instance, policy=None):
         self.address = address
         self.raw = instance
+        self.policy = policy
+        #: last value successfully commanded per parameter — the reference
+        #: point for the profile's max_step ceiling, tracked here so the
+        #: check costs no extra instrument I/O in the measurement loop
+        self._last_set: dict[str, float] = {}
         self.set_options: list[str] = list(getattr(instance, "set_options", []))
         self.get_options: list[str] = list(getattr(instance, "get_options", []))
 
@@ -101,7 +114,19 @@ class DriverAdapter:
         return parameter in self.get_options
 
     def set(self, parameter: str, value: float,
-            speed: Optional[float] = None) -> None:
+            speed: Optional[float] = None, safety: bool = False) -> None:
+        """Command a parameter, subject to the lab profile's envelope.
+
+        ``safety=True`` marks a protective move (ramp to zero, park at the
+        safe value, retreat from a fault): those are clamped into the
+        allowed range instead of being refused, because a safety mechanism
+        the limits can veto is worse than none.
+        """
+        policy = getattr(self, "policy", None)
+        if policy is not None:
+            value, speed = policy.check_set(
+                self.address, parameter, value, speed=speed,
+                current=self._last_set.get(parameter), safety=safety)
         setter = getattr(self.raw, f"set_{parameter}")
         if speed is not None:
             try:
@@ -110,8 +135,10 @@ class DriverAdapter:
                 params = {}
             if "speed" in params:
                 setter(value=value, speed=speed)
+                self._last_set[parameter] = float(value)
                 return
         setter(value=value)
+        self._last_set[parameter] = float(value)
 
     def pause(self) -> None:
         fn = getattr(self.raw, "pause", None)
@@ -288,8 +315,13 @@ class DeviceRegistry:
     existing installation carries its device setup over untouched.
     """
 
-    def __init__(self, core_dir: str):
+    def __init__(self, core_dir: str, policy=None):
         self.core_dir = core_dir
+        #: shared safety envelope handed to every adapter (see limits.py);
+        #: ``None`` means unbounded, which is what a rig without a lab
+        #: profile gets — installing this layer changes nothing until the
+        #: profile file exists
+        self.policy = policy
         self.resources_dir = os.path.join(core_dir, "resources")
         self.config_path = os.path.join(core_dir, "config",
                                         "address_dictionary.txt")
@@ -454,6 +486,7 @@ class DeviceRegistry:
                         f"driver class '{class_name}' not found in "
                         f"resources")
                 adapter = DriverAdapter(address, cls(adress=address))
+            adapter.policy = getattr(self, "policy", None)
         except BaseException:
             with self._lock:
                 self._pending.pop(address, None)
@@ -472,6 +505,16 @@ class DeviceRegistry:
             stale.close()
             return self.connect(address)      # build the new type instead
         return adapter
+
+    def set_policy(self, policy) -> None:
+        """Install (or replace) the safety envelope, including on the
+        instruments already connected — reloading the lab profile must not
+        leave a live adapter running under the old limits."""
+        self.policy = policy
+        with self._lock:
+            adapters = list(self._adapters.values())
+        for adapter in adapters:
+            adapter.policy = policy
 
     def connected(self, address: str) -> Optional[DriverAdapter]:
         with self._lock:
