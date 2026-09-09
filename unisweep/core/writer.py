@@ -10,7 +10,12 @@ Output stays byte-compatible with the old app so every downstream tool
 * columns: ``time``, one ``<device>.<param>_sweep`` column per axis, then the
   selected read parameters;
 * a file that ends up with no data rows is deleted on close (legacy
-  behaviour).
+  behaviour) — and so is its sidecar.
+
+Each data file is accompanied by a JSON sidecar of the same stem recording
+what produced it (see :mod:`unisweep.core.provenance`). It is written when
+the file opens, so a sweep that dies overnight still leaves a record, and
+stamped with the row count when it closes.
 
 The writer runs entirely inside the engine thread — one owner, no shared
 file handles.
@@ -59,8 +64,11 @@ class DataWriter:
     """Owns the current data file; rotates per outer-axes point."""
 
     def __init__(self, core_dir: str, columns: Sequence[str],
-                 filename: str = ""):
+                 filename: str = "", provenance=None):
         self.core_dir = core_dir
+        #: optional RunProvenance; absent, no sidecars are written and the
+        #: writer behaves exactly as it did before
+        self.provenance = provenance
         self.columns = tuple(columns)
         self.directory = daily_data_dir(core_dir)
         self.ymd = datetime.today().strftime("%y%m%d")
@@ -111,6 +119,11 @@ class DataWriter:
         self._writer.writerow(self.columns)
         self._fh.flush()
         self._rows_in_file = 0
+        if self.provenance is not None:
+            try:
+                self.provenance.write(self.path, outer_values, self.columns)
+            except Exception:                     # noqa: BLE001
+                pass          # paperwork must never fail a measurement
         return self.path
 
     def write(self, row: Sequence) -> None:
@@ -123,11 +136,20 @@ class DataWriter:
     def close(self) -> None:
         if self._fh is not None:
             path, empty = self.path, self._rows_in_file == 0
+            rows = self._rows_in_file
             self._fh.close()
             self._fh = self._writer = None
             if empty and path:
                 try:
                     os.remove(path)
                 except OSError:
+                    pass
+            if path and self.provenance is not None:
+                try:
+                    if empty:
+                        self.provenance.discard(path)
+                    else:
+                        self.provenance.close(path, rows)
+                except Exception:                 # noqa: BLE001
                     pass
         self.path = None if self._fh is None else self.path

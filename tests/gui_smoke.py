@@ -421,6 +421,7 @@ def control_surface_check():
                      "sweep.dimensions", "sweep.axis1.start",
                      "sweep.reads", "sweep.script", "sweep.load_script",
                      "sweep.save_script", "sweep.script_file",
+                     "sweep.filename",
                      "setget.row1.set", "setget.delay", "settings.theme",
                      "settings.agent_enabled", "devices.scan"):
         assert required in names, f"missing control: {required}"
@@ -431,6 +432,8 @@ def control_surface_check():
     assert not broken, f"controls whose value could not be read: {broken}"
     assert len(described) > 60, f"only {len(described)} controls found"
     assert any(n.endswith(".type") for n in names), "no device rows"
+    assert "sweep.intent" not in names and "sweep.campaign" not in names, \
+        "the output card asks for nothing but a filename"
 
     # ---- 2. typing into the fields -----------------------------------
     session.set_controls({"sweep.dimensions": "2D"})

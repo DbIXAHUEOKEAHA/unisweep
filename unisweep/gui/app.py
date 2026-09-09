@@ -51,6 +51,7 @@ class App:
         self.settings = AppSettings.load(core_dir)
         _theme.init_theme(self.settings.theme)
         apply_theme(self.root)
+        self._apply_window_icon()
         self._maximize()
 
         self.registry = DeviceRegistry(core_dir)
@@ -285,6 +286,36 @@ class App:
         self.on_devices_changed()
 
     @staticmethod
+    def _logo_path() -> str:
+        """logo.ico, found relative to the package rather than the cwd —
+        the app is started from anywhere."""
+        here = os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))))
+        path = os.path.join(here, "logo.ico")
+        return path if os.path.exists(path) else ""
+
+    def _apply_window_icon(self) -> None:
+        """Windows takes the .ico directly; X11 does not, so fall back to
+        Pillow and iconphoto. An app without an icon is not a reason to
+        fail to start, so every step is optional."""
+        path = self._logo_path()
+        if not path:
+            return
+        try:
+            self.root.iconbitmap(default=path)
+            return
+        except Exception:                          # noqa: BLE001
+            pass
+        try:
+            from PIL import Image, ImageTk
+            image = Image.open(path)
+            image.thumbnail((128, 128))
+            self._icon_image = ImageTk.PhotoImage(image)
+            self.root.iconphoto(True, self._icon_image)
+        except Exception:                          # noqa: BLE001
+            pass
+
+    @staticmethod
     def _maximize_root(root):
         # baseline: fill the screen even without a window manager…
         root.geometry(f"{root.winfo_screenwidth()}x"
@@ -350,7 +381,9 @@ class App:
 
         def work():
             n = restyle_saved_images(data_dir, config.zcol, vmin, vmax,
-                                     labels, title=config.title)
+                                     labels, title=config.title,
+                                     cmap=config.cmap,
+                                     ztransform=config.ztransform)
             self.event_queue.put(
                 ("notify_result",
                  f"plot settings applied to {n} saved image(s)"

@@ -2266,3 +2266,52 @@ def test_restyle_applies_the_colormap_and_transform_to_saved_images():
     assert not np.array_equal(plain, render(cmap="viridis",
                                             ztransform="v ** 2")), \
         "the z-transform must reach the saved PNG"
+
+
+def test_the_map_window_hands_its_whole_style_to_the_saved_images():
+    """The call site, not the renderer.
+
+    ``restyle_saved_images`` accepts a colormap and a z-transform; the
+    window has to actually pass them. The test above proves the renderer
+    honours them, and stayed green while the GUI called it with neither —
+    which is exactly what "I applied the settings and the colours did not
+    change" looked like from the outside.
+    """
+    import pytest
+    import queue as _queue
+    import types
+    pytest.importorskip("tkinter")
+    if not (sys.platform.startswith("win") or os.environ.get("DISPLAY")):
+        pytest.skip("importing the GUI binds matplotlib's Tk backend, "
+                    "which needs a display")
+    from unisweep.gui.app import App
+    from unisweep.core import maps as maps_mod
+
+    seen: dict = {}
+
+    def fake(data_dir, param, vmin=None, vmax=None, labels=None,
+             title="", cmap="viridis", ztransform=""):
+        seen.update(param=param, vmin=vmin, vmax=vmax, title=title,
+                    cmap=cmap, ztransform=ztransform, labels=labels)
+        return 1
+
+    real = maps_mod.restyle_saved_images
+    maps_mod.restyle_saved_images = fake
+    try:
+        window = types.SimpleNamespace(
+            _last_data_dir=tempfile.mkdtemp(), event_queue=_queue.Queue(),
+            status=lambda *a, **k: None)
+        config = types.SimpleNamespace(
+            zcol="M2.Curr", auto_z=False, zmin=0.0, zmax=1.0,
+            xlabel="Vg", ylabel="B", title="a map",
+            cmap="magma", ztransform="v ** 2")
+        App._restyle_map_images(window, config)
+        window.event_queue.get(timeout=20)          # the worker finished
+    finally:
+        maps_mod.restyle_saved_images = real
+
+    assert seen["cmap"] == "magma", "the colormap never left the window"
+    assert seen["ztransform"] == "v ** 2", "the z-transform never left it"
+    assert (seen["vmin"], seen["vmax"]) == (0.0, 1.0)
+    assert seen["title"] == "a map"
+    assert seen["labels"]["x"] == "Vg"

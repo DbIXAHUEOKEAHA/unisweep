@@ -51,7 +51,9 @@ from .events import (ApproachStarted, ApproachFinished, AxisStepped,
                      SweepPaused, SweepResumed, SweepStarted, WalkFinished)
 from .labprofile import LabProfile
 from .limits import validate_program
+from .journal import Journal
 from .maps import MapWriter
+from .provenance import RunProvenance
 from .runner import AxisRunner
 from .writer import DataWriter
 
@@ -146,6 +148,8 @@ class SweepEngine(threading.Thread):
         self._last_reads: list = []
         self._last_row: tuple = ()
 
+        self.provenance: Optional[RunProvenance] = None
+        self.journal: Optional[Journal] = None
         self._points_done = 0
         self._durations: deque[float] = deque(maxlen=25)
         self._was_paused = False
@@ -1107,8 +1111,20 @@ class SweepEngine(threading.Thread):
             self._resolve_devices()
             self.columns = self._build_columns()
             prog = self.live.get()
+            # captured after the devices resolve, so instrument identities
+            # and loggable settings can actually be read — once, here,
+            # rather than at every file rotation
+            self.provenance = RunProvenance(
+                self.core_dir, prog, self.profile, self.registry).capture()
             self._writer = DataWriter(self.core_dir, self.columns,
-                                      prog.filename)
+                                      prog.filename,
+                                      provenance=self.provenance)
+            try:
+                self.journal = Journal(self.core_dir)
+                self.journal.start_run(self.provenance,
+                                       dimensions=self.dims)
+            except Exception as exc:              # noqa: BLE001
+                self._error("journal", exc)       # never fatal
             # initialise current positions from readback where possible
             for i in range(self.dims):
                 ax = prog.axes[i]
@@ -1165,5 +1181,15 @@ class SweepEngine(threading.Thread):
             for a in self._adapters:
                 if a is not None:
                     a.clear()
+            if self.journal is not None and self.provenance is not None:
+                # after the writer closed, so the file list is complete
+                try:
+                    self.journal.finish_run(
+                        self.provenance.run_id, stopped=stopped,
+                        points=self._points_done,
+                        files=list(self.provenance.files),
+                        directory=getattr(self._writer, "directory", ""))
+                except Exception as exc:          # noqa: BLE001
+                    self._error("journal", exc)
             self._emit(SweepFinished(stopped=stopped,
                                      points=self._points_done))

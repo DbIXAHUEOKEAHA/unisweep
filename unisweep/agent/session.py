@@ -28,7 +28,9 @@ import time
 from typing import Any, Iterable, Optional, Sequence
 
 from ..core.config import SweepProgram, program_from_dict, program_to_dict
+from ..core.journal import Journal
 from ..core.labprofile import DerivedEvaluator, LabProfile
+from ..core.provenance import read_sidecar
 from ..core.limits import LimitPolicy, estimate_program, validate_program
 from .bridge import TkBridge
 from .controls import ControlError, ControlRegistry, UnknownControl
@@ -59,6 +61,7 @@ class AgentSession:
     def __init__(self, app, bridge=None):
         self.app = app
         self.bridge = bridge if bridge is not None else TkBridge(app.root)
+        self._journal: Optional[Journal] = None
 
     # ================================================================
     # the control surface
@@ -123,6 +126,26 @@ class AgentSession:
             "instruments": self.list_instruments()["instruments"],
             "readable_channels": list(registry.read_catalogue()),
             "sweep": self.status(points=0),
+            "recent_runs": [self._run_digest(run)
+                            for run in self.journal.runs(limit=5)],
+        }
+
+    @staticmethod
+    def _run_digest(run: dict) -> dict:
+        """One run at a glance: enough to see what has been tried and how
+        the runs group, without pulling every program back."""
+        program = run.get("program") or {}
+        axes = program.get("axes") or ()
+        return {
+            "run_id": run.get("run_id", ""),
+            "started_at": run.get("started_at", ""),
+            "dimensions": run.get("dimensions", 0) or len(axes),
+            "points": run.get("points", 0),
+            "stopped": bool(run.get("stopped")),
+            "swept": [f"{a.get('device', '?')}.{a.get('parameter', '?')} "
+                      f"{a.get('start')} to {a.get('stop')}" for a in axes],
+            "reads": list(program.get("reads") or ()),
+            "files": list(run.get("files") or ())[:4],
         }
 
     def list_instruments(self) -> dict:
@@ -466,6 +489,46 @@ class AgentSession:
         tap = self.app.event_tap
         return {"columns": list(tap.columns),
                 "points": tap.last_points(count)}
+
+    # ================================================================
+    # the lab journal
+    # ================================================================
+    @property
+    def journal(self) -> Journal:
+        if self._journal is None:
+            self._journal = Journal(self.app.core_dir)
+        return self._journal
+
+    def journal_note(self, text: str, run_id: str = "",
+                     author: str = "assistant") -> dict:
+        """Write a line in the notebook. Nobody is obliged to; this is
+        where a conclusion drawn from the data gets written down."""
+        ok = self.journal.note(text, run_id=run_id, author=author)
+        return {"written": ok, "file": self.journal.markdown_path(),
+                "error": self.journal.last_error if not ok else ""}
+
+    def journal_runs(self, limit: int = 20, since: str = "",
+                     full: bool = False) -> dict:
+        runs = self.journal.runs(limit=limit, since=since)
+        if full:
+            return {"runs": runs}
+        return {"runs": [self._run_digest(run) for run in runs]}
+
+    def journal_run(self, run_id: str) -> dict:
+        record = self.journal.run(run_id)
+        if record is None:
+            raise SessionError(f"no run called '{run_id}' in the journal")
+        record["notes"] = self.journal.notes(limit=100, run_id=run_id)
+        return record
+
+    def file_provenance(self, path: str) -> dict:
+        """What produced a data file, from its JSON sidecar."""
+        record = read_sidecar(str(path))
+        if record is None:
+            raise SessionError(
+                f"no provenance sidecar beside '{path}' — either the file "
+                f"predates provenance recording, or the path is wrong")
+        return record
 
 
 def _duration(seconds: float) -> str:

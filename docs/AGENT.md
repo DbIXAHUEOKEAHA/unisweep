@@ -121,6 +121,15 @@ change takes effect on the next point. That is the adaptive path: watch
 `read_channels` and `set_parameter` reach instruments directly, through
 the same limit policy the engine uses.
 
+Every run records itself: a JSON sidecar beside each data file and an
+entry in the lab journal, carrying the whole program, the instruments and
+their logged settings, and the software revision. Nothing is typed by the
+operator — there is no intent field and no campaign field — so read the
+grouping out of the record instead: `journal_runs` says what each run
+swept and read and when, `journal_run` gives one in full, and
+`file_provenance` reads the sidecar beside a file. `journal_note` is
+where your own conclusions go. See `docs/JOURNAL.md`.
+
 ---
 
 ## Dialogs are answers, not obstacles

@@ -271,6 +271,48 @@ Read channels once, right now, plus any derived values the profile
 defines from them. Use this to check where things stand before planning a
 sweep — not as a way to take data, which is what a sweep is for.
 """),
+    # ---- the lab journal -----------------------------------------------
+    _tool("journal_note", "journal_note", properties={
+        "text": dict(_STR, description="The note. Write what you concluded "
+                                       "and why, not what you did — the "
+                                       "run record already says that."),
+        "run_id": dict(_STR, description="Attach it to a run."),
+        "author": dict(_STR, description="Defaults to 'assistant'.")},
+        required=["text"], description="""
+Write a line in the lab journal: append-only Markdown under `journal/`
+plus an indexed copy. Use it for what a notebook is for — what you
+concluded, what looked wrong, what the next run should do differently.
+Runs record themselves; you do not need to log that a sweep happened.
+"""),
+    _tool("journal_runs", "journal_runs", read_only=True, properties={
+        "limit": dict(_INT, description="Most recent first (default 20)."),
+        "since": dict(_STR, description="ISO timestamp or date prefix; "
+                                        "only runs started at or after it."),
+        "full": dict(_BOOL, description="Whole records instead of the "
+                                        "digest — verbose.")},
+        description="""
+What has been measured, newest first: run id, when, what each axis swept
+and between which limits, what was read, how many points, whether it was
+stopped, and the files it wrote. Nobody labels runs with an intent or a
+campaign, so read the grouping out of this: runs on the same channels
+close together in time are one investigation. This is also how to find
+out what already exists before proposing to measure it again.
+"""),
+    _tool("journal_run", "journal_run", read_only=True, properties={
+        "run_id": _STR}, required=["run_id"], description="""
+One run in full — the whole program (axes, reads, condition, per-point
+script, output options), the instruments and their logged settings, the
+files it wrote, and every note attached to it.
+"""),
+    _tool("file_provenance", "file_provenance", read_only=True, properties={
+        "path": dict(_STR, description="Path to a data file (.csv).")},
+        required=["path"], description="""
+What produced a data file, from the JSON sidecar written beside it: the
+whole sweep program, every instrument's identity and logged settings, a
+snapshot of the lab profile, and the software revision. Read this before
+drawing conclusions from a file you did not watch being taken.
+"""),
+
     _tool("set_parameter", "set_parameter", destructive=True, properties={
         "address": dict(_STR, description="Address, 'address.parameter', "
                                           "or a lab profile alias."),

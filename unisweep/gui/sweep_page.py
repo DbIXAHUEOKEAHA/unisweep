@@ -380,9 +380,15 @@ class SweepPage(ttk.Frame):
         self.filename.grid(row=1, column=1, sticky="w", padx=6)
         ttk.Label(out, text="empty = auto (YYMMDD-N, outer values embedded)",
                   style="Muted.TLabel").grid(row=1, column=2, sticky="w")
+        ttk.Label(out, text="Every data file gets a .json sidecar recording "
+                            "the program, the instrument settings and the "
+                            "software revision; runs are logged under "
+                            "journal/.",
+                  style="Muted.TLabel", wraplength=680, justify="left").grid(
+            row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
         ttk.Label(out, text="Map/data output options moved to the "
                             "Settings page.",
-                  style="Muted.TLabel").grid(row=2, column=0, columnspan=3,
+                  style="Muted.TLabel").grid(row=3, column=0, columnspan=3,
                                              sticky="w", pady=(6, 0))
 
         script = Collapsible(body, "Per-point script (advanced)")

@@ -1033,3 +1033,89 @@ def test_real_pages_declare_unique_control_names():
                                 f"both {seen.get(first.value)} and {where}")
                     seen[first.value] = where
     assert len(seen) > 40, f"only {len(seen)} named controls found"
+
+
+# ===========================================================================
+# the lab journal and provenance
+# ===========================================================================
+def test_the_page_asks_for_nothing_but_the_filename(session):
+    """The output card is one field. Anything that would have to be typed
+    to explain a run — an intent, a campaign — is gone on purpose: the
+    record is read off the sweep instead."""
+    result = _arm(session, filename="gate_sweep")
+    assert session.read_controls(["sweep.filename"])["sweep.filename"] == \
+        "gate_sweep"
+    assert result["program"]["filename"] == "gate_sweep"
+    for gone in ("sweep.intent", "sweep.campaign"):
+        with pytest.raises(UnknownControl):
+            session.read_controls([gone])
+
+
+def test_a_run_started_by_the_assistant_files_what_it_did(session):
+    from unisweep.core.provenance import read_sidecar
+    started = session.run_sweep({
+        "axes": [{"device": "GATE", "parameter": "Volt", "start": 0.0,
+                  "stop": 1.0, "rate": 0.25, "delay": 0.005,
+                  "count_mode": "step", "walks": 1}],
+        "reads": ["GATE.Leak"]})
+    assert started["started"] is True
+    session.app.wait_idle()
+
+    runs = session.journal_runs()["runs"]
+    assert runs and runs[0]["points"] == 5
+    assert runs[0]["swept"] == ["GATE.Volt 0.0 to 1.0"]
+    assert runs[0]["reads"] == ["GATE.Leak"]
+    assert runs[0]["stopped"] is False
+
+    record = session.journal_run(runs[0]["run_id"])
+    assert record["files"], "the run must record the files it wrote"
+    assert record["program"]["axes"][0]["parameter"] == "Volt"
+    assert record["instruments"]["GATE"]["driver"] == "LeakyGate"
+    sidecar = read_sidecar(record["files"][0])
+    assert sidecar["run_id"] == runs[0]["run_id"]
+
+
+def test_the_assistant_can_write_in_the_notebook(session):
+    written = session.journal_note("leakage runs away above +4 V")
+    assert written["written"] is True
+    text = open(written["file"], encoding="utf-8").read()
+    assert "leakage runs away above +4 V" in text
+    assert "assistant" in text
+    assert session.journal.notes()[0]["author"] == "assistant"
+
+
+def test_file_provenance_reads_the_sidecar_back(session):
+    session.run_sweep({
+        "axes": [{"device": "GATE", "parameter": "Volt", "start": 0.0,
+                  "stop": 0.5, "rate": 0.25, "delay": 0.005,
+                  "count_mode": "step", "walks": 1}],
+        "reads": ["GATE.Leak"]})
+    session.app.wait_idle()
+    path = session.journal_runs()["runs"][0]["files"][0]
+    record = session.file_provenance(path)
+    assert record["columns"] == ["time", "GATE.Volt_sweep", "GATE.Leak"]
+    assert record["instruments"]["GATE"]["driver"] == "LeakyGate"
+    assert record["lab_profile"]["parameters"]["GATE.Volt"]["alias"] == "Vbg"
+
+
+def test_asking_for_provenance_that_is_not_there_explains_itself(session):
+    with pytest.raises(SessionError) as excinfo:
+        session.file_provenance("/nowhere/at/all.csv")
+    assert "no provenance sidecar" in str(excinfo.value)
+    with pytest.raises(SessionError):
+        session.journal_run("not-a-run")
+
+
+def test_describe_rig_shows_what_has_been_measured_lately(session):
+    session.run_sweep({
+        "axes": [{"device": "GATE", "parameter": "Volt", "start": 0.0,
+                  "stop": 0.5, "rate": 0.25, "delay": 0.005,
+                  "count_mode": "step", "walks": 1}],
+        "reads": ["GATE.Leak"]})
+    session.app.wait_idle()
+    described = session.describe_rig()
+    recent = described["recent_runs"][0]
+    assert recent["swept"] == ["GATE.Volt 0.0 to 0.5"]
+    assert recent["reads"] == ["GATE.Leak"]
+    assert recent["points"] == 3 and recent["files"]
+
