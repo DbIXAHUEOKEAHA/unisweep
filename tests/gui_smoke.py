@@ -141,10 +141,49 @@ def main():
             dlg.destroy()
     mp.open_settings()
     pump(0.1)
+    # Feature 6, end to end: pressing Apply/OK on a map window restyles
+    # that read's saved PNGs and GIFs — with the style the user just
+    # chose. The restyle call used to sit ABOVE the block that copies the
+    # widgets into the config, so the renderer got the PREVIOUS colormap,
+    # limits and transform: one Apply behind, which from the outside is
+    # indistinguishable from "I changed the colormap and nothing
+    # happened". Recorded at call time, because the config is correct by
+    # the time the dialog closes either way.
+    restyled: dict = {}
+    previous_hook = app.plots.restyle_images
+    app.plots.restyle_images = lambda cfg: restyled.update(
+        cmap=cfg.cmap, ztransform=cfg.ztransform, zcol=cfg.zcol)
     for dlg in mp.winfo_children():
         if isinstance(dlg, PlotSettingsDialog):
+            assert mp.config.cmap != "magma", "pick a colormap it lacks"
+            dlg.b_cmap.set("magma")
+            dlg.e_zt.delete(0, "end")
+            dlg.e_zt.insert(0, "v * 2")
             dlg._ok()
     pump(0.1)
+    app.plots.restyle_images = previous_hook
+    assert restyled.get("cmap") == "magma", \
+        (f"Apply restyled the saved images with cmap="
+         f"{restyled.get('cmap')!r} instead of the chosen 'magma'")
+    assert restyled.get("ztransform") == "v * 2", \
+        f"the z-transform did not reach the restyle: {restyled!r}"
+
+    # …and it has to be pointed at the right folder. The maps live in
+    # <YYMMDD>/2d_maps, a SIBLING of <YYMMDD>/data_files, so the window
+    # has to remember the day folder. Remembering data_files sent the
+    # restyle walking data_files/2d_maps — a path that never exists — so
+    # it found nothing and changed nothing, whatever style was chosen.
+    from unisweep.core import events as smoke_ev
+    from unisweep.core.maps import day_dir_for
+    day = os.path.join(app.core_dir, "260909")
+    app.event_queue.put(smoke_ev.FileOpened(
+        path=os.path.join(day, "data_files", "260909-1.csv"),
+        columns=("time",)))
+    pump(0.4)
+    assert getattr(app, "_last_day_dir", "") == day, \
+        (f"the map restyle would look under "
+         f"{getattr(app, '_last_day_dir', '')!r}, not {day!r}")
+    assert day_dir_for(os.path.join(day, "data_files", "x.csv")) == day
 
     # ---- 2. cold monitor plot + idle buttons everywhere ---------------
     app.show_page("Set & Get")

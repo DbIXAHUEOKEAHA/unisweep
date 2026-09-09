@@ -2299,7 +2299,7 @@ def test_the_map_window_hands_its_whole_style_to_the_saved_images():
     maps_mod.restyle_saved_images = fake
     try:
         window = types.SimpleNamespace(
-            _last_data_dir=tempfile.mkdtemp(), event_queue=_queue.Queue(),
+            _last_day_dir=tempfile.mkdtemp(), event_queue=_queue.Queue(),
             status=lambda *a, **k: None)
         config = types.SimpleNamespace(
             zcol="M2.Curr", auto_z=False, zmin=0.0, zmax=1.0,
@@ -2315,3 +2315,96 @@ def test_the_map_window_hands_its_whole_style_to_the_saved_images():
     assert (seen["vmin"], seen["vmax"]) == (0.0, 1.0)
     assert seen["title"] == "a map"
     assert seen["labels"]["x"] == "Vg"
+
+
+def test_the_renderer_can_still_make_gifs():
+    """``_render_gif`` once slipped out of ``_Renderer`` and into dead
+    code after a ``return`` in ``restyle_saved_images``. The class kept
+    dispatching GIF jobs to a method it no longer had, and the bare
+    ``except`` around the dispatch swallowed every AttributeError — so
+    3-D sweeps silently stopped producing animations and the restyle
+    silently stopped rebuilding them.
+    """
+    import inspect
+    from unisweep.core.maps import _Renderer
+    assert callable(getattr(_Renderer, "_render_gif", None)), \
+        "the renderer lost its GIF method"
+    assert list(inspect.signature(_Renderer._render_gif).parameters)[:3] \
+        == ["self", "image_dir", "param"]
+
+
+def test_restyling_rebuilds_the_gif_next_to_the_pngs():
+    """The user's feature 6 is 'apply the settings to all saved .png AND
+    .gif files', so the GIF has to be rebuilt from the re-rendered
+    frames, not left showing the old colours."""
+    import pytest
+    pytest.importorskip("imageio")
+    import tempfile
+    from unisweep.core.maps import restyle_saved_images
+
+    data_dir = tempfile.mkdtemp()
+    tdir = os.path.join(data_dir, "2d_maps", "tables", "run_1")
+    os.makedirs(tdir)
+    for it in (1, 2):
+        with open(os.path.join(tdir, f"run_M2.Curr_map_{it}.csv"), "w") as fh:
+            fh.write("T / V,0.0,0.5,1.0\n")
+            fh.write(f"1.0,0.1,0.2,{0.3 * it}\n")
+            fh.write(f"2.0,0.2,0.4,{0.6 * it}\n")
+
+    assert restyle_saved_images(data_dir, "M2.Curr", cmap="magma") == 2
+    gif = os.path.join(data_dir, "2d_maps", "images", "gifs",
+                       "M2.Curr_map.gif")
+    assert os.path.exists(gif), \
+        f"no gif rebuilt; tree: {sorted(os.listdir(os.path.join(data_dir, '2d_maps', 'images')))}"
+
+
+def test_a_saved_map_is_found_and_restyled_from_its_data_file():
+    """The folder arithmetic between a data file and its maps.
+
+    ``<YYMMDD>/data_files/<file>.csv`` and ``<YYMMDD>/2d_maps/images/…``
+    are siblings. The GUI remembered the *data_files* folder and handed
+    that to the restyle, which then walked ``data_files/2d_maps`` — a
+    path that never exists — found nothing, and changed nothing, whatever
+    colormap was chosen. Both sides now derive the day folder through
+    ``day_dir_for()``; this pins that they agree on real sweep output,
+    which is the check that would have caught it.
+    """
+    import matplotlib
+    matplotlib.use("Agg", force=False)
+    import matplotlib.image as mpimg
+    from unisweep.core.maps import day_dir_for, restyle_saved_images
+
+    prog = SweepProgram(
+        axes=(AxisProgram(device="M1", parameter="Volt", start=0.0,
+                          stop=0.2, rate=0.1, delay=0.005,
+                          count_mode=CountMode.STEP),
+              AxisProgram(device="M2", parameter="Volt", start=0.0,
+                          stop=0.4, rate=0.1, delay=0.005,
+                          count_mode=CountMode.STEP)),
+        reads=("M2.Curr",), save_maps=True, map_images=True)
+    evs, _, tmp = run_engine(prog, {"M1": MockDevice("M1"),
+                                    "M2": MockDevice("M2")}, timeout=120)
+
+    opened = [e for e in evs if isinstance(e, ev.FileOpened)]
+    assert opened, "the sweep wrote no data file"
+    day = day_dir_for(opened[0].path)
+    assert os.path.isdir(os.path.join(day, "2d_maps")), \
+        f"the maps are not beside the data files: {day}"
+
+    images = os.path.join(day, "2d_maps", "images")
+    png = ""
+    for _ in range(100):                       # the renderer is a thread
+        for root, _dirs, names in os.walk(images):
+            for name in names:
+                if name.endswith(".png"):
+                    png = os.path.join(root, name)
+        if png:
+            break
+        time.sleep(0.2)
+    assert png, f"no PNG was rendered under {images}"
+
+    before = mpimg.imread(png).copy()
+    n = restyle_saved_images(day, "M2.Curr", cmap="magma")
+    assert n >= 1, "the restyle found no saved image of that read"
+    assert not np.array_equal(before, mpimg.imread(png)), \
+        "the saved image was found but not restyled"

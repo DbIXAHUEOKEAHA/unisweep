@@ -52,6 +52,18 @@ from .filenames import fix_unicode, unify_filename
 __all__ = ["MapWriter", "index_ticks"]
 
 
+def day_dir_for(data_path: str) -> str:
+    """The ``<YYMMDD>`` folder a data file belongs to.
+
+    Data files live in ``<YYMMDD>/data_files``; the map tables and images
+    live in ``<YYMMDD>/2d_maps``, a *sibling* of it. Anything that wants
+    to find one from the other has to step up two levels, and getting
+    that wrong is silent — the walk simply finds nothing. So there is one
+    implementation, and both the map writer and the GUI call it.
+    """
+    return os.path.dirname(os.path.dirname(data_path))
+
+
 def _safe(name: str) -> str:
     return name.replace(":", "").replace("/", "-").replace("\\", "-")
 
@@ -186,6 +198,31 @@ class _Renderer(threading.Thread):
     def _render_png(self, table_path, vmin, vmax, labels) -> None:
         render_table_png(table_path, vmin, vmax, labels)
 
+    def _render_gif(self, image_dir: str, param: str) -> None:
+        try:
+            import imageio.v2 as imageio
+        except ImportError:
+            return
+        files = []
+        for root, _dirs, names in os.walk(image_dir):
+            if "gifs" in root:
+                continue
+            for n in names:
+                if n.endswith(".png") and f"_{_safe(param)}_map_" in n:
+                    try:
+                        it = int(n.rsplit("_", 1)[-1][:-4])
+                    except ValueError:
+                        continue
+                    files.append((it, os.path.join(root, n)))
+        if len(files) < 2:
+            return
+        files.sort()
+        gif_dir = os.path.join(image_dir, "gifs")
+        os.makedirs(gif_dir, exist_ok=True)
+        out = os.path.join(gif_dir, f"{_safe(param)}_map.gif")
+        frames = [imageio.imread(p) for _, p in files]
+        imageio.mimsave(out, frames, duration=0.5)
+
 
 def render_table_png(table_path, vmin, vmax, labels,
                      title: str = "", cmap: str = "viridis",
@@ -261,32 +298,6 @@ def restyle_saved_images(data_dir: str, param: str, vmin=None, vmax=None,
         except Exception:                 # noqa: BLE001
             pass
     return n
-
-    def _render_gif(self, image_dir: str, param: str) -> None:
-        try:
-            import imageio.v2 as imageio
-        except ImportError:
-            return
-        files = []
-        for root, _dirs, names in os.walk(image_dir):
-            if "gifs" in root:
-                continue
-            for n in names:
-                if n.endswith(".png") and f"_{_safe(param)}_map_" in n:
-                    try:
-                        it = int(n.rsplit("_", 1)[-1][:-4])
-                    except ValueError:
-                        continue
-                    files.append((it, os.path.join(root, n)))
-        if len(files) < 2:
-            return
-        files.sort()
-        gif_dir = os.path.join(image_dir, "gifs")
-        os.makedirs(gif_dir, exist_ok=True)
-        out = os.path.join(gif_dir, f"{_safe(param)}_map.gif")
-        frames = [imageio.imread(p) for _, p in files]
-        imageio.mimsave(out, frames, duration=0.5)
-
 
 def _read_table(path):
     try:
@@ -368,7 +379,7 @@ class MapWriter:
             self.index = int(stem[stem.rfind("-") + 1:])
             stem = stem[: stem.rfind("-")]
         self.base = unify_filename(stem)
-        day_dir = os.path.dirname(os.path.dirname(data_path))  # …/<YYMMDD>
+        day_dir = day_dir_for(data_path)
         self.root = os.path.join(day_dir, "2d_maps", "tables",
                                  f"{self.base}_{self.index}")
         self.image_root = os.path.join(day_dir, "2d_maps", "images",
