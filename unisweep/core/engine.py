@@ -107,12 +107,17 @@ class _Stopped(Exception):
 class SweepEngine(threading.Thread):
 
     def __init__(self, live: LiveProgram, registry: DeviceRegistry,
-                 core_dir: str, out_queue: "queue.Queue", profile=None):
+                 core_dir: str, out_queue: "queue.Queue", profile=None,
+                 map_style_source=None):
         super().__init__(daemon=True, name="unisweep-engine")
         self.live = live
         self.registry = registry
         self.core_dir = core_dir
         self.q = out_queue
+        # Optional callable read -> {"cmap": …, "ztransform": …}: how the
+        # GUI is currently drawing that read, so the PNGs written during
+        # the sweep match the window instead of the defaults.
+        self.map_style_source = map_style_source
         # The lab profile supplies the pre-flight envelope and the names
         # used in messages. It is taken from the registry's policy when
         # not passed explicitly, so the engine, the Devices page and any
@@ -1032,7 +1037,8 @@ class SweepEngine(threading.Thread):
                 self.core_dir, self.live, self._loop_axes, self.reads,
                 data_path, interpolated=prog.map_interpolated,
                 images=prog.map_images, write_files=prog.save_maps,
-                style=prog.map_style, uniform=prog.map_uniform)
+                style=prog.map_style, uniform=prog.map_uniform,
+                style_source=self.map_style_source)
         except Exception as exc:              # noqa: BLE001
             self._error("maps", exc)
             self._map = None
@@ -1171,6 +1177,10 @@ class SweepEngine(threading.Thread):
             if self._map is not None:
                 try:
                     self._map.finish()
+                    if self._map.last_render_error:
+                        self._error("maps", RuntimeError(
+                            "a map image could not be rendered: "
+                            + self._map.last_render_error))
                 except Exception:                 # noqa: BLE001
                     pass
             if self.live.get().to_zero_on_finish and not self.tozero_ev.is_set():

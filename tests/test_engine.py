@@ -2408,3 +2408,119 @@ def test_a_saved_map_is_found_and_restyled_from_its_data_file():
     assert n >= 1, "the restyle found no saved image of that read"
     assert not np.array_equal(before, mpimg.imread(png)), \
         "the saved image was found but not restyled"
+
+
+def test_the_sweeps_own_pngs_are_drawn_with_the_window_style():
+    """The live renderer, not the restyle.
+
+    Every committed row re-renders that read's PNG. It used to do so with
+    a hardcoded ``viridis``, so a colormap chosen in the plot window was
+    undone by the very next row — and after the sweep the last render is
+    what stays on disk. That is why "apply the settings to the saved
+    images" still looked broken once the restyle itself was correct: the
+    file really did change, and then changed back.
+    """
+    from unisweep.core import maps as maps_mod
+
+    seen: list = []
+    real = maps_mod.render_table_png
+
+    def spy(table_path, vmin, vmax, labels, title="", cmap="viridis",
+            ztransform=""):
+        seen.append({"cmap": cmap, "ztransform": ztransform})
+        return real(table_path, vmin, vmax, labels, title=title, cmap=cmap,
+                    ztransform=ztransform)
+
+    maps_mod.render_table_png = spy
+    try:
+        tmp = tempfile.mkdtemp(prefix="unisweep_style_")
+        prog = SweepProgram(
+            axes=(AxisProgram(device="M1", parameter="Volt", start=0.0,
+                              stop=0.2, rate=0.1, delay=0.005,
+                              count_mode=CountMode.STEP),
+                  AxisProgram(device="M2", parameter="Volt", start=0.0,
+                              stop=0.4, rate=0.1, delay=0.005,
+                              count_mode=CountMode.STEP)),
+            reads=("M2.Curr",), save_maps=True, map_images=True)
+        engine = SweepEngine(
+            LiveProgram(prog),
+            FakeRegistry(tmp, {"M1": MockDevice("M1"),
+                               "M2": MockDevice("M2")}),
+            tmp, queue.Queue(),
+            map_style_source=lambda read: {"cmap": "magma",
+                                           "ztransform": "v * 2"})
+        engine.start()
+        engine.join(120)
+        assert not engine.is_alive()
+    finally:
+        maps_mod.render_table_png = real
+
+    assert seen, "the sweep rendered no PNG at all"
+    assert {e["cmap"] for e in seen} == {"magma"}, \
+        f"the live render ignored the window's colormap: {seen}"
+    assert {e["ztransform"] for e in seen} == {"v * 2"}
+
+
+def test_a_sweep_without_a_gui_keeps_the_default_style():
+    """No windows, no provider — a headless sweep must not need one."""
+    tmp = tempfile.mkdtemp(prefix="unisweep_nostyle_")
+    prog = SweepProgram(
+        axes=(AxisProgram(device="M1", parameter="Volt", start=0.0,
+                          stop=0.2, rate=0.1, delay=0.005,
+                          count_mode=CountMode.STEP),
+              AxisProgram(device="M2", parameter="Volt", start=0.0,
+                          stop=0.4, rate=0.1, delay=0.005,
+                          count_mode=CountMode.STEP)),
+        reads=("M2.Curr",), save_maps=True, map_images=True)
+    engine = SweepEngine(LiveProgram(prog),
+                         FakeRegistry(tmp, {"M1": MockDevice("M1"),
+                                            "M2": MockDevice("M2")}),
+                         tmp, queue.Queue())
+    engine.start()
+    engine.join(120)
+    assert not engine.is_alive()
+    assert engine.map_style_source is None
+    pngs = [os.path.join(r, n) for r, _d, ns in os.walk(tmp) for n in ns
+            if n.endswith(".png")]
+    assert pngs, "a headless sweep still writes its images"
+
+
+def test_a_broken_style_source_cannot_fail_a_sweep():
+    """The provider reaches into the GUI from the render path. A window
+    closing mid-sweep must cost a colour, never the measurement."""
+    tmp = tempfile.mkdtemp(prefix="unisweep_badstyle_")
+
+    def hostile(read):
+        raise RuntimeError("the window is gone")
+
+    prog = SweepProgram(
+        axes=(AxisProgram(device="M1", parameter="Volt", start=0.0,
+                          stop=0.2, rate=0.1, delay=0.005,
+                          count_mode=CountMode.STEP),
+              AxisProgram(device="M2", parameter="Volt", start=0.0,
+                          stop=0.4, rate=0.1, delay=0.005,
+                          count_mode=CountMode.STEP)),
+        reads=("M2.Curr",), save_maps=True, map_images=True)
+    engine = SweepEngine(LiveProgram(prog),
+                         FakeRegistry(tmp, {"M1": MockDevice("M1"),
+                                            "M2": MockDevice("M2")}),
+                         tmp, queue.Queue(), map_style_source=hostile)
+    engine.start()
+    engine.join(120)
+    assert not engine.is_alive()
+    pngs = [os.path.join(r, n) for r, _d, ns in os.walk(tmp) for n in ns
+            if n.endswith(".png")]
+    assert pngs, "the sweep must still write its images"
+
+
+def test_the_renderer_shuts_down_cleanly():
+    """``threading.Thread._stop`` is a method the standard library calls
+    from ``join()`` and ``is_alive()``. The renderer used to keep an
+    Event under that name, so ``close()`` raised "'Event' object is not
+    callable" at the end of every sweep: the thread was never joined and
+    the last images raced the shutdown.
+    """
+    from unisweep.core.maps import _Renderer
+    renderer = _Renderer()
+    renderer.close()                  # must not raise
+    assert not renderer.is_alive()

@@ -574,6 +574,33 @@ class PlotManager:
         win.mark_dirty()
         return win
 
+    def map_style_for(self, read: str = "") -> dict:
+        """How a saved map image of ``read`` should be drawn.
+
+        A map window showing this read is the truth; any map window is the
+        next best answer; failing that, the template the last one left
+        behind, which is what the next window would use. Called from the
+        render thread, so it reads plain attributes and touches no Tk
+        widget.
+        """
+        chosen = None
+        for win in self.windows:
+            cfg = getattr(win, "config", None)
+            if cfg is None or cfg.kind != "map":
+                continue
+            if read and cfg.zcol == read:
+                chosen = cfg
+                break
+            if chosen is None:
+                chosen = cfg
+        if chosen is not None:
+            return {"cmap": chosen.cmap, "ztransform": chosen.ztransform}
+        saved = self._templates.get("map") or {}
+        default = PlotConfig(kind="map")
+        return {"cmap": saved.get("cmap") or default.cmap,
+                "ztransform": saved.get("ztransform")
+                or default.ztransform}
+
     def map_cmap(self) -> str:
         """The colour scale maps are being drawn with right now.
 
@@ -585,11 +612,7 @@ class PlotManager:
         Safe to call from another thread: it reads plain attributes and
         touches no Tk widget.
         """
-        for win in self.windows:
-            if win.config.kind == "map":       # PlotWindow.config is its
-                return win.config.cmap         # PlotConfig, not Tk's
-        saved = (self._templates.get("map") or {}).get("cmap")
-        return saved or PlotConfig(kind="map").cmap
+        return self.map_style_for()["cmap"]
 
     def _config_for(self, kind: str) -> PlotConfig:
         fields = {f.name for f in dataclasses.fields(PlotConfig)}

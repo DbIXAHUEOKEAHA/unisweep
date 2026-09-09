@@ -567,10 +567,175 @@ def control_surface_check():
           f"{len(pages)} pages")
 
 
+
+def map_colormap_check():
+    """The colormap, from the combobox to the file on disk.
+
+    The user's report, three times over: "I choose another colormap and
+    the saved .png is still viridis." It was never one bug — the renderer
+    ignored the colormap, the call site did not pass it, the dialog
+    restyled before reading its own widgets, the window remembered the
+    wrong folder, and the sweep's own renderer re-wrote every PNG with
+    the default on the next row. Every one of those produces exactly the
+    same symptom, so this phase drives the whole chain the way a person
+    does and looks at the pixels.
+    """
+    import matplotlib
+    matplotlib.use("Agg", force=False)
+    import matplotlib.image as mpimg
+    import numpy as np
+    from unisweep.agent.session import AgentSession
+    from unisweep.gui.plot_panel import PlotSettingsDialog
+
+    # The phases before this one destroyed their Tk roots; their widgets
+    # are still garbage. Collect it HERE, on the main thread, or the
+    # render thread trips over a dead Tk interpreter inside someone's
+    # __del__ mid-figure and quietly never writes the file. (A harness
+    # artifact — the real app has one root and never destroys it.)
+    import gc
+    gc.collect()
+
+    appmod.DeviceRegistry = FakeRegistry
+    app = appmod.App(scratch("uni_cmap"))
+    tk_errors = []
+    app.root.report_callback_exception = \
+        lambda et, ev_, tb: tk_errors.append((et.__name__, str(ev_)))
+
+    def pump(seconds=0.2):
+        t0 = time.time()
+        while time.time() - t0 < seconds:
+            app.root.update()
+            time.sleep(0.01)
+
+    pump(0.4)
+    if app._wizard is not None:
+        app._wizard._skip()
+    pump(0.2)
+
+    read = "LOCKIN.Curr"
+    session = AgentSession(app)
+    started = session.run_sweep({
+        "axes": [{"device": "SMU", "parameter": "Volt", "start": 0.0,
+                  "stop": 0.2, "rate": 0.1, "delay": 0.005,
+                  "count_mode": "step", "walks": 1, "snake": False},
+                 {"device": "LOCKIN", "parameter": "Volt", "start": 0.0,
+                  "stop": 0.4, "rate": 0.1, "delay": 0.005,
+                  "count_mode": "step", "walks": 1, "snake": False}],
+        "reads": [read]})
+    assert started["started"], started
+
+    # the sweep's own PNGs must be drawn with what the windows show, so
+    # the engine has to be holding the provider, not a default
+    assert app.engine.map_style_source == app.plots.map_style_for, \
+        "the engine cannot see the plot windows' style"
+
+    for _ in range(600):
+        pump(0.05)
+        if app.event_tap.state == "finished":
+            break
+    assert app.event_tap.state == "finished", session.status()
+
+    day = getattr(app, "_last_day_dir", "")
+    assert day and os.path.isdir(os.path.join(day, "2d_maps")), \
+        f"the maps are not where the window will look for them: {day!r}"
+    images = os.path.join(day, "2d_maps", "images")
+    png = ""
+    for _ in range(200):                       # the renderer is a thread
+        for root, _dirs, names in os.walk(images):
+            for name in names:
+                if name.endswith(".png"):
+                    png = os.path.join(root, name)
+        if png:
+            break
+        pump(0.1)
+    assert png, f"the sweep rendered no PNG under {images}"
+    pump(0.5)
+    before = mpimg.imread(png).copy()
+
+    # now do what the user does: open a map window on that read, pick a
+    # different colormap, press OK
+    mp = app.plots.spawn("map")
+    pump(0.3)
+    mp.open_settings()
+    pump(0.2)
+    applied = False
+    for dlg in mp.winfo_children():
+        if isinstance(dlg, PlotSettingsDialog):
+            dlg.b_z.set(read)
+            dlg.b_cmap.set("magma")
+            dlg._ok()
+            applied = True
+    assert applied, "the map settings dialog never opened"
+    pump(0.3)
+
+    assert app.plots.map_style_for(read)["cmap"] == "magma", \
+        "the window's own colormap is not what the renderer would be told"
+
+    changed = False
+    for _ in range(300):                       # the restyle is a thread
+        pump(0.1)
+        if not np.array_equal(before, mpimg.imread(png)):
+            changed = True
+            break
+    assert changed, (f"the saved image is still the colours it was: "
+                     f"{os.path.basename(png)}")
+
+    # …and it stays changed: nothing may quietly re-render it back
+    pump(1.0)
+    assert not np.array_equal(before, mpimg.imread(png)), \
+        "something re-rendered the PNG with the old colours"
+
+    # The other half of "change the colormap on the go": a sweep running
+    # now writes its own PNGs, one per committed row. If those are drawn
+    # with the default instead of what the window shows, the choice is
+    # undone by the next row and re-applying it only helps until then.
+    from unisweep.core import maps as maps_mod
+    seen_cmaps: list = []
+    real_render = maps_mod.render_table_png
+
+    def spy(table_path, vmin, vmax, labels, title="", cmap="viridis",
+            ztransform=""):
+        seen_cmaps.append(cmap)
+        return real_render(table_path, vmin, vmax, labels, title=title,
+                           cmap=cmap, ztransform=ztransform)
+
+    maps_mod.render_table_png = spy
+    try:
+        again = session.run_sweep({
+            "axes": [{"device": "SMU", "parameter": "Volt", "start": 0.0,
+                      "stop": 0.2, "rate": 0.1, "delay": 0.005,
+                      "count_mode": "step", "walks": 1, "snake": False},
+                     {"device": "LOCKIN", "parameter": "Volt", "start": 0.0,
+                      "stop": 0.4, "rate": 0.1, "delay": 0.005,
+                      "count_mode": "step", "walks": 1, "snake": False}],
+            "reads": [read]},
+            # the instruments are parked at the end of the last sweep, so
+            # Unisweep asks; "no" measures from where they stand
+            answers=["no"])
+        assert again["started"], again
+        for _ in range(600):
+            pump(0.05)
+            if app.event_tap.state == "finished":
+                break
+        pump(1.5)
+    finally:
+        maps_mod.render_table_png = real_render
+    assert seen_cmaps, "the second sweep rendered no map image"
+    assert set(seen_cmaps) == {"magma"}, \
+        (f"a running sweep drew its own images with {sorted(set(seen_cmaps))} "
+         f"while the window showed magma")
+
+    app._on_close()
+    assert not tk_errors, tk_errors
+    print(f"MAP COLORMAP OK — {os.path.basename(png)} recoloured on Apply")
+
+
 if __name__ == "__main__":
     import shutil
-    for _name in ("uni_coldstart", "uni_lifecycle", "uni_controls"):
+    for _name in ("uni_coldstart", "uni_lifecycle", "uni_controls",
+                  "uni_cmap"):
         shutil.rmtree(scratch(_name), ignore_errors=True)
     main()
     lifecycle_check()
     control_surface_check()
+    map_colormap_check()

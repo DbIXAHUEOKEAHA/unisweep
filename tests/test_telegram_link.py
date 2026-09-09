@@ -172,12 +172,14 @@ def test_a_finished_sweep_does_not_wait_for_the_next_heartbeat():
     assert not link._urgent                # ordinary traffic can wait
     link.on_event(ev.SweepFinished(stopped=False, points=10))
     assert link._urgent                    # this cannot
-    for junk in (ev.SweepError(where="x", message="y", fatal=True),
-                 ev.GuardTripped(source="s", action="stop", message="m",
-                                 values={}, axis_values=(), applied=True)):
+    # every other kind the link treats as urgent must do the same. The
+    # guards subsystem that once supplied a third kind is gone (its job
+    # belongs to the per-point script), so these are the two that remain.
+    for urgent in (ev.SweepError(where="x", message="y", fatal=True),
+                   ev.SweepFinished(stopped=True, points=3)):
         link._urgent = False
-        link.on_event(junk)
-        assert link._urgent, junk
+        link.on_event(urgent)
+        assert link._urgent, urgent
 
 
 def test_the_urgent_flag_clears_only_once_everything_is_delivered():

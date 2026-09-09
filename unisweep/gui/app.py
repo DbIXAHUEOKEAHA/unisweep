@@ -399,10 +399,20 @@ class App:
                   "x": config.xlabel or "", "y": config.ylabel or ""}
 
         def work():
-            n = restyle_saved_images(data_dir, config.zcol, vmin, vmax,
-                                     labels, title=config.title,
-                                     cmap=config.cmap,
-                                     ztransform=config.ztransform)
+            # on a worker thread: an exception here would kill the thread
+            # in silence, and the user would see nothing at all happen —
+            # which is precisely how this feature failed before
+            try:
+                n = restyle_saved_images(data_dir, config.zcol, vmin, vmax,
+                                         labels, title=config.title,
+                                         cmap=config.cmap,
+                                         ztransform=config.ztransform)
+            except Exception as exc:               # noqa: BLE001
+                self.event_queue.put(
+                    ("notify_result",
+                     f"could not restyle the saved images: "
+                     f"{type(exc).__name__}: {exc}"))
+                return
             self.event_queue.put(
                 ("notify_result",
                  f"plot settings applied to {n} saved image(s)"
@@ -777,8 +787,11 @@ class App:
             return None
         self.live = LiveProgram(program)
         self.live_data.reset(columns=(), dimensions=program.dimensions)
+        # the sweep's own PNGs are drawn with whatever the map windows
+        # show, so a colour scale chosen mid-run survives the next row
         self.engine = SweepEngine(self.live, self.registry, self.core_dir,
-                                  self.event_queue, profile=self.profile)
+                                  self.event_queue, profile=self.profile,
+                                  map_style_source=self.plots.map_style_for)
         self._paused = False
         self.engine.start()
         self.led.set(PALETTE["green"])

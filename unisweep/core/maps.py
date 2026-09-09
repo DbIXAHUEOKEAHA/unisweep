@@ -156,12 +156,22 @@ class _Renderer(threading.Thread):
         self._q: "queue.Queue" = queue.Queue()
         self._pending: dict[str, tuple] = {}
         self._lock = threading.Lock()
-        self._stop = threading.Event()
+        # NB: no attribute named _stop. threading.Thread._stop is a
+        # method the standard library calls from join() and is_alive();
+        # shadowing it with an Event made close() raise "'Event' object
+        # is not callable" at the end of every sweep, so the renderer was
+        # never joined and the last images raced the shutdown. The stop
+        # signal is a queue item, which is what run() actually reads.
+        # a render that fails silently is how "the image never changed"
+        # goes unnoticed for weeks; keep the reason so someone can ask
+        self.last_error = ""
         self.start()
 
-    def submit_png(self, table_path: str, vmin, vmax, labels) -> None:
+    def submit_png(self, table_path: str, vmin, vmax, labels,
+                   cmap: str = "viridis", ztransform: str = "") -> None:
         with self._lock:
-            self._pending[table_path] = (vmin, vmax, labels)
+            self._pending[table_path] = (vmin, vmax, labels, cmap,
+                                         ztransform)
         self._q.put(("png", table_path))
 
     def submit_gif(self, image_dir: str, param: str) -> None:
@@ -185,8 +195,10 @@ class _Renderer(threading.Thread):
                         self._render_png(payload, *job)
                 elif kind == "gif":
                     self._render_gif(*payload)
-            except Exception:                     # noqa: BLE001 - best effort
-                pass
+            except Exception as exc:              # noqa: BLE001
+                # best effort — a failed image must not stop the sweep,
+                # but it must be answerable afterwards
+                self.last_error = f"{type(exc).__name__}: {exc}"
 
     @staticmethod
     def _image_path(table_path: str) -> str:
@@ -195,8 +207,10 @@ class _Renderer(threading.Thread):
         parts[-1] = os.path.splitext(parts[-1])[0] + ".png"
         return os.path.sep.join(parts)
 
-    def _render_png(self, table_path, vmin, vmax, labels) -> None:
-        render_table_png(table_path, vmin, vmax, labels)
+    def _render_png(self, table_path, vmin, vmax, labels,
+                    cmap: str = "viridis", ztransform: str = "") -> None:
+        render_table_png(table_path, vmin, vmax, labels, cmap=cmap,
+                         ztransform=ztransform)
 
     def _render_gif(self, image_dir: str, param: str) -> None:
         try:
@@ -235,11 +249,20 @@ def render_table_png(table_path, vmin, vmax, labels,
     saved image that ignored them was the bug behind "I applied the
     settings and the colours did not change": the limits, labels and
     title were re-applied, the colormap was hardcoded.
+
+    **No pyplot here.** This runs on the render thread and on the plot
+    window's restyle thread, inside a process whose matplotlib is bound
+    to Tk for the live plots. pyplot's figure manager belongs to the main
+    loop, so calling it from another thread raises "main thread is not in
+    main loop" — which the renderer's ``except`` swallowed, leaving the
+    old PNG on disk and nobody any the wiser. Switching the backend
+    instead is not an option either: it would take the GUI's own canvases
+    with it. The object API with an explicit Agg canvas touches no global
+    state and is safe from any thread.
     """
     from .expr import apply_transform
-    import matplotlib
-    matplotlib.use("Agg", force=False)
-    import matplotlib.pyplot as plt
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
 
     rows, header, grid = _read_table(table_path)
     if rows is None or not len(rows):
@@ -250,7 +273,9 @@ def render_table_png(table_path, vmin, vmax, labels,
     z = apply_transform(ztransform, rows[:, 1:])
     image_path = _Renderer._image_path(table_path)
     os.makedirs(os.path.dirname(image_path), exist_ok=True)
-    fig, ax = plt.subplots(figsize=(6, 4.5))
+    fig = Figure(figsize=(6, 4.5))
+    FigureCanvasAgg(fig)                       # the figure needs a canvas
+    ax = fig.subplots()
     if vmin is None or vmax is None:
         vmin = np.nanmin(z) if np.isfinite(z).any() else 0
         vmax = np.nanmax(z) if np.isfinite(z).any() else 1
@@ -262,10 +287,7 @@ def render_table_png(table_path, vmin, vmax, labels,
     ax.set_xlabel(labels.get("x", ""))
     ax.set_ylabel(labels.get("y", ""))
     index_ticks(ax, grid, y)
-    try:
-        fig.savefig(image_path, dpi=300, bbox_inches="tight")
-    finally:
-        plt.close(fig)
+    fig.savefig(image_path, dpi=300, bbox_inches="tight")
     return image_path
 
 
@@ -354,7 +376,8 @@ class MapWriter:
                  loop_axes: Sequence[int], reads: Sequence[str],
                  data_path: str, interpolated: bool = True,
                  images: bool = True, write_files: bool = True,
-                 style: str = "grid", uniform: bool = False):
+                 style: str = "grid", uniform: bool = False,
+                 style_source=None):
         self.core_dir = core_dir
         self.live = live
         self.loop_axes = list(loop_axes)
@@ -371,6 +394,10 @@ class MapWriter:
         self.xyz_files = write_files and self.style in ("xyz", "both")
         self._xyz_handles: dict[str, object] = {}
         self.images = images and self.grid_files
+        # How the saved images should be drawn. The plot window is the
+        # source of truth; without one (headless, tests) the renderer
+        # keeps its defaults.
+        self.style_source = style_source
 
         base = os.path.basename(data_path)
         stem = os.path.splitext(base)[0]
@@ -407,6 +434,27 @@ class MapWriter:
             else "_map"
         return fix_unicode(os.path.join(
             self._dir(), f"{self.index}_{_safe(read)}{suffix}.csv"))
+
+    @property
+    def last_render_error(self) -> str:
+        return getattr(self._renderer, "last_error", "") \
+            if self._renderer is not None else ""
+
+    def _style_for(self, read: str) -> dict:
+        """The colour scale and transform this read is being shown with.
+
+        Every committed row re-renders the PNG. Rendering it with the
+        default scale while the window shows another is the "I changed
+        the colormap and the file did not" bug in its most confusing
+        form: the file changes back on the very next row, so even
+        re-applying the settings only helps until the next line lands.
+        """
+        if self.style_source is None:
+            return {}
+        try:
+            return dict(self.style_source(read) or {})
+        except Exception:                       # noqa: BLE001
+            return {}                           # never fail a sweep
 
     def _labels(self, read: str) -> dict:
         prog = self.live.get()
@@ -587,8 +635,17 @@ class MapWriter:
                     else None
                 vmax = self._zmax.get(read) if self.master_axis is not None \
                     else None
-                self._renderer.submit_png(path, vmin, vmax,
-                                          self._labels(read))
+                style = self._style_for(read)
+                if style.get("ztransform"):
+                    # the stacked limits are in raw units; once a
+                    # transform is applied they no longer describe the
+                    # numbers being drawn, so let the renderer take the
+                    # limits from the transformed values instead
+                    vmin = vmax = None
+                self._renderer.submit_png(
+                    path, vmin, vmax, self._labels(read),
+                    cmap=style.get("cmap") or "viridis",
+                    ztransform=style.get("ztransform") or "")
         self._inner_vals.clear()
         for read in self.reads:
             self._read_vals[read].clear()
