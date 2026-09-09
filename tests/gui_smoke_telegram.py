@@ -192,6 +192,20 @@ def main() -> int:
         assert "already called" in _boxes[-1][2], _boxes[-1]
         assert "ATTODRY-1" in _boxes[-1][2], _boxes[-1]
 
+    def colours_come_from_the_map_window():
+        """The bot used to ask which colour scale to draw with. It should
+        just use the one on screen, and the last one chosen when there is
+        no window open."""
+        assert app._map_cmap() in ("viridis", "")     # nothing opened yet
+        app.plots._templates["map"] = {"cmap": "plasma"}
+        assert app._map_cmap() == "plasma", "the saved choice is ignored"
+        win = app.plots.spawn("map")
+        try:
+            win.config.cmap = "inferno"
+            assert app._map_cmap() == "inferno", "the open window is ignored"
+        finally:
+            app.plots.remove(win)
+
     def closing_reports_the_sweep():
         """The bug: the engine's SweepFinished lands in the queue, the
         pump is cancelled, and the notification is built and binned."""
@@ -212,6 +226,7 @@ def main() -> int:
     check("only the necessary boxes are left", only_the_necessary_boxes)
     check("settings survive a round trip through disk", persistence)
     check("a clashing setup name is explained", name_clash_is_explained)
+    check("map colours follow the plot window", colours_come_from_the_map_window)
     check("closing hands the sweep-ended event to the link",
           closing_reports_the_sweep)
 

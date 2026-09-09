@@ -345,7 +345,6 @@ async def _fanout(rig: dict, links: list, events: list,
             if kind == "finished" and prefs.get("photo"):
                 photo = await _finish_photo(rig_id, name, snapshot,
                                             prefs.get("read") or "",
-                                            prefs.get("cmap", "viridis"),
                                             photo_cache)
             key = (f"{rig_id}:{seq}:{chat_id}" if seq is not None
                    else f"{rig_id}:{kind}:{hash(text) & 0xffffffff}:{chat_id}")
@@ -354,8 +353,8 @@ async def _fanout(rig: dict, links: list, events: list,
 
 
 async def _finish_photo(rig_id: str, name: str, snapshot: Any, read: str,
-                        cmap: str, cache: dict):
-    """One render per (parameter, colormap) however many chats want it."""
+                        cache: dict):
+    """One render per parameter, however many chats want that parameter."""
     if not isinstance(snapshot, dict) or not snapshot:
         stored = await asyncio.to_thread(db.snapshot_get, rig_id)
         snapshot = unpack_snapshot((stored or {}).get("payload")) or {}
@@ -364,13 +363,13 @@ async def _finish_photo(rig_id: str, name: str, snapshot: Any, read: str,
         return None
     if read not in reads:
         read = reads[0]
-    key = (read, cmap)
-    if key in cache:
-        return cache[key]
+    if read in cache:
+        return cache[read]
     photo = await asyncio.to_thread(
         render.safe_render, render.auto_figure, snapshot, read,
-        f"{name} — {read}", snapshot.get("file", ""), cmap)
-    cache[key] = photo
+        f"{name} — {read}", snapshot.get("file", ""),
+        snapshot.get("cmap", ""))
+    cache[read] = photo
     return photo
 
 

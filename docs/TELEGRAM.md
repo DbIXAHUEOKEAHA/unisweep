@@ -104,6 +104,11 @@ different parameter is instant and costs the measurement computer nothing.
 They come back at about 15 kB — sized for a phone and palette-reduced —
 so asking for one costs you nothing either.
 
+Maps use **the colour scale your own map window is set to**, so the picture
+on your phone matches the one on the screen; change it in the plot window's
+settings and the next one sent follows. With no map window ever opened, it
+is viridis.
+
 The sweep-ended message is **text**. A picture is thousands of times the
 bytes of the sentence you actually read, so it is not attached by default;
 `/alerts picture on` turns it on for anyone who wants one every time, and

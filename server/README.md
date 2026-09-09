@@ -28,7 +28,9 @@ notices and says so.
 Commands ask; keyboards pick. `/line` and `/map` hang the parameter list
 under the picture and swap it in place on a tap; `/alerts` is a column of
 🔔/🔕 switches. That is all a keyboard is used for — choosing from a list
-and flipping a switch. There is no menu, no navigation, no "back", and the
+and flipping a switch. Map colours are not among the choices: the rig
+reports the scale its own map window is drawing with and the server obeys
+it, so a picture in the chat matches the screen it came from. There is no menu, no navigation, no "back", and the
 notifications the bot pushes carry no buttons at all, because a keyboard
 older than 48 h can no longer be edited and Telegram's search does not find
 buttons. Everything tappable is therefore also typable: `/line lockin.y`,

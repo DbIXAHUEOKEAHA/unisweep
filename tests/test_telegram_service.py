@@ -192,6 +192,27 @@ def test_map_declines_on_all_nan():
 
 def test_unknown_colormap_falls_back_instead_of_raising():
     assert render.render_map(_map(), "A", "t", cmap="not-a-cmap")
+    assert render.known_cmap("not-a-cmap") == render.DEFAULT_CMAP
+    assert render.known_cmap("") == render.DEFAULT_CMAP
+    assert render.known_cmap(None) == render.DEFAULT_CMAP
+
+
+def test_the_rigs_own_colour_scale_is_the_one_used():
+    """A map in the chat should look like the map on the screen, so the
+    scale travels with the data and is not chosen again in Telegram —
+    including scales the desktop offers and this module never listed."""
+    for name in ("plasma", "jet", "seismic", "RdBu_r", "gray"):
+        assert render.known_cmap(name) == name, name
+    # and it reaches the renderer from the snapshot, not from prefs
+    import inspect
+    from unisweep_bot import handlers, ingest
+    for module in (handlers, ingest):
+        source = inspect.getsource(module)
+        assert 'prefs.get("cmap"' not in source, module.__name__
+        assert 'snapshot.get("cmap"' in source or \
+               '.get("cmap", "")' in source, module.__name__
+    assert "cmap" not in fmt.DEFAULT_PREFS
+    assert fmt.pref_key("colours") == "" and fmt.pref_key("cmap") == ""
 
 
 def test_auto_figure_prefers_the_map_when_there_is_one():
@@ -223,7 +244,7 @@ def test_series_palette_is_fixed_and_long_enough():
     # cycled through a generator
     assert len(render.SERIES) == 8
     assert render.SERIES[0] == "#2a78d6"
-    assert render.DEFAULT_CMAP in render.CMAPS
+    assert render.known_cmap(render.DEFAULT_CMAP) == render.DEFAULT_CMAP
 
 
 # --------------------------------------------------------------- routing --
@@ -260,10 +281,12 @@ def test_buttons_exist_only_for_picking_and_toggling():
 
     assert data, "the pickers lost their keyboards"
     for item in data:
-        head = item.split(":")[0]
-        assert head in ("line", "map", "pref", "cmap", "menu"), item
-    # the only "menu:" left is the colour picker, not a screen to go back to
-    assert sorted({d for d in data if d.startswith("menu:")}) == ["menu:cmap"]
+        head = item.partition(":")[0]
+        assert head in ("line", "map", "pref"), item
+    # no submenu, and so nothing to return from: a keyboard that opens
+    # another keyboard has started standing in for a command
+    assert not [d for d in data if d.startswith("menu:")]
+    assert "↩" not in inspect.getsource(handlers)
 
 
 def _callback_data(module):
@@ -295,8 +318,29 @@ def test_the_parameter_picker_marks_the_current_one():
     labels = [b.text for row in markup.inline_keyboard for b in row]
     assert labels == ["LOCKIN.X", "• LOCKIN.Y"], labels
     data = [b.callback_data for row in markup.inline_keyboard for b in row]
-    assert data == ["line:0", "line:1"], data
+    assert data == ["line:LOCKIN.X", "line:LOCKIN.Y"], data
     assert all(len(d.encode()) <= 64 for d in data)
+
+
+def test_every_button_picks_the_parameter_it_is_labelled_with():
+    """The bug this exists for: buttons carried a 0-based index while a
+    bare number means a 1-based position, so the first button asked for
+    "0" ("I don't have 0") and the rest were each off by one."""
+    from unisweep_bot.handlers import reads_keyboard, _pick_read
+    cases = [
+        ["LOCKIN.X", "LOCKIN.Y", "SMU.Curr"],          # the ordinary case
+        ["1", "2", "3"],                                # names that are digits
+        ["A" * 80, "B"],                                # too long for callback
+        ["LOCKIN.X", "LOCKIN.XY"],                      # one is a prefix
+    ]
+    for reads in cases:
+        markup = reads_keyboard(reads, reads[0], "line")
+        data = [b.callback_data for row in markup.inline_keyboard for b in row]
+        assert len(data) == len(reads), (reads, data)
+        for want, item in zip(reads, data):
+            assert len(item.encode()) <= 64, item          # Telegram's limit
+            asked = item.partition(":")[2]
+            assert _pick_read(reads, asked, "") == want, (reads, item, want)
 
 
 def test_the_alerts_keyboard_shows_every_switch():

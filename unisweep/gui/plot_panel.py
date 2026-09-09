@@ -261,11 +261,6 @@ class PlotSettingsDialog(tk.Toplevel):
         c.title = self.e_title.value() or ""
         c.on_top = self.v_ontop.get()
         self.view.set_topmost(c.on_top)
-        if c.kind == "map" and self.view.manager.restyle_images:
-            try:
-                self.view.manager.restyle_images(c)
-            except Exception:                     # noqa: BLE001
-                pass
         if c.kind == "line":
             c.xcol, c.ycol = self.b_x.get(), self.b_y.get()
             c.xlabel = self.e_xlabel.value() or ""
@@ -287,6 +282,15 @@ class PlotSettingsDialog(tk.Toplevel):
             c.auto_z = self.v_auto_z.get()
             c.zmin, c.zmax = self.e_zmin.value(), self.e_zmax.value()
             c.ztransform = self.e_zt.value() or ""
+        # Only now does the config hold what the widgets say. Restyling
+        # the saved images any earlier hands the renderer the PREVIOUS
+        # colormap, limits and transform — one Apply behind, which from
+        # the outside looks exactly like "the settings did nothing".
+        if c.kind == "map" and self.view.manager.restyle_images:
+            try:
+                self.view.manager.restyle_images(c)
+            except Exception:                     # noqa: BLE001
+                pass
         self.view.refresh_header()
         self.view.mark_dirty()
         self.view.manager.save_templates()
@@ -569,6 +573,23 @@ class PlotManager:
         self.on_count_changed(len(self.windows))
         win.mark_dirty()
         return win
+
+    def map_cmap(self) -> str:
+        """The colour scale maps are being drawn with right now.
+
+        An open map window is the truth.  With none open, the template the
+        last one left behind is what the next window would use, so it is
+        the honest answer to "what colours does this setup use" — and only
+        a machine that has never opened a map falls back to the default.
+
+        Safe to call from another thread: it reads plain attributes and
+        touches no Tk widget.
+        """
+        for win in self.windows:
+            if win.config.kind == "map":       # PlotWindow.config is its
+                return win.config.cmap         # PlotConfig, not Tk's
+        saved = (self._templates.get("map") or {}).get("cmap")
+        return saved or PlotConfig(kind="map").cmap
 
     def _config_for(self, kind: str) -> PlotConfig:
         fields = {f.name for f in dataclasses.fields(PlotConfig)}

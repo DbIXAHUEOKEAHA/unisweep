@@ -181,12 +181,14 @@ class TelegramLink:
 
     def __init__(self, live_data=None, live_maps=None,
                  program_getter: Callable = None,
+                 cmap_getter: Callable = None,
                  status_cb: Callable = None,
                  command_cb: Callable = None,
                  rig_name: str = ""):
         self._data = live_data
         self._maps = live_maps
         self._program_getter = program_getter or (lambda: None)
+        self._cmap_getter = cmap_getter or (lambda: "")
         self._status_cb = status_cb or (lambda text, state: None)
         self._command_cb = command_cb or (lambda cid, kind: None)
 
@@ -756,12 +758,26 @@ class TelegramLink:
             out = {"state": state, "columns": list(columns),
                    "dimensions": dims, "reads": list(reads),
                    "file": file_name, "at": time.time(),
+                   "cmap": self._cmap(),
                    "trace": self._trace(data, columns, dims, reads),
                    "stats": self._stats(data, reads),
                    "maps": self._map_payload(maps, columns, dims, reads)}
             return out
         except Exception:                              # noqa: BLE001
             return {}
+
+    def _cmap(self) -> str:
+        """Which colour scale this machine draws its maps with.
+
+        A map in the chat should look like the map on the screen, so the
+        scale travels with the data rather than being chosen again in
+        Telegram.  Never raises and never blocks: a plot window that has
+        gone away mid-read is worth a default, not a lost snapshot.
+        """
+        try:
+            return str(self._cmap_getter() or "")[:32]
+        except Exception:                              # noqa: BLE001
+            return ""
 
     def _trace(self, data, columns, dims, reads) -> dict:
         """The current walk along the fast (innermost) axis.

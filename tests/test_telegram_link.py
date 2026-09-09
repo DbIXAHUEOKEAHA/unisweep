@@ -378,7 +378,7 @@ def test_snapshot_command_only_schedules_a_push():
 
 
 # ------------------------------------------------------------ snapshot ---
-def _sweep_2d(rows=6, points=25):
+def _sweep_2d(rows=6, points=25, cmap_getter=None):
     """A 2-D sweep whose live stores hold plausible data."""
     columns = ("time", "MAG.Field_sweep", "GATE.Volt_sweep",
                "LOCKIN.X", "LOCKIN.Y")
@@ -386,7 +386,8 @@ def _sweep_2d(rows=6, points=25):
     data.reset(columns, 2)
     maps.reset(("LOCKIN.X", "LOCKIN.Y"))
     link = TelegramLink(live_data=data, live_maps=maps,
-                        program_getter=lambda: None)
+                        program_getter=lambda: None,
+                        cmap_getter=cmap_getter)
     link.configure(service_url="https://bot.example", rig_id="RIG",
                    rig_token="t" * 32, rig_name="R", allow_control=False)
     link.on_event(ev.SweepStarted(columns=columns, dimensions=2,
@@ -443,6 +444,27 @@ def test_snapshot_carries_trace_stats_and_maps():
 
     # and the whole thing must survive strict JSON
     json.dumps(snap, allow_nan=False)
+
+
+def test_the_snapshot_carries_the_screens_own_colour_scale():
+    """A map in the chat should look like the map on the screen, so the
+    scale is reported rather than chosen again in Telegram — and a plot
+    window that has gone away mid-read costs a default, not a snapshot."""
+    link, _d, _m = _sweep_2d(rows=2, points=5, cmap_getter=lambda: "plasma")
+    assert link._build_snapshot()["cmap"] == "plasma"
+
+    def boom():
+        raise RuntimeError("the window closed")
+    link, _d, _m = _sweep_2d(rows=2, points=5, cmap_getter=boom)
+    snap = link._build_snapshot()
+    assert snap["cmap"] == "" and snap["maps"], snap.get("cmap")
+
+    # a machine that has never opened a map says nothing and the server
+    # picks; a name long enough to be nonsense is trimmed, not trusted
+    link, _d, _m = _sweep_2d(rows=2, points=5)
+    assert link._build_snapshot()["cmap"] == ""
+    link, _d, _m = _sweep_2d(rows=2, points=5, cmap_getter=lambda: "x" * 200)
+    assert len(link._build_snapshot()["cmap"]) == 32
 
 
 def test_snapshot_is_decimated_and_stays_small():

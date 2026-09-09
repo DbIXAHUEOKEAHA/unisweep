@@ -160,6 +160,26 @@ async def safe_edit(query, text: str, markup=None) -> None:
         logger.warning("edit failed: %s", exc)
 
 
+def read_token(reads, i: int, kind: str) -> str:
+    """What a button hands back when it is tapped.
+
+    The parameter's **name**, not its position, for two reasons: a bare
+    number means a position to ``_pick_read`` and positions are 1-based
+    there, so an index would be wrong by one; and a keyboard outlives the
+    sweep that drew it, where position 3 of the old list is not position
+    3 of the new one, while a name that has gone away says so.
+
+    Telegram allows 64 bytes of callback data.  A name too long for that,
+    or one made only of digits (which would read back as a position),
+    falls back to the position — 1-based, so the button and ``/line 3``
+    ask for exactly the same thing.
+    """
+    name = reads[i]
+    if not name.isdigit() and len(f"{kind}:{name}".encode()) <= 64:
+        return name
+    return str(i + 1)
+
+
 def reads_keyboard(reads, current: str, kind: str) -> InlineKeyboardMarkup:
     """One button per measured parameter, the current one marked.
 
@@ -170,8 +190,9 @@ def reads_keyboard(reads, current: str, kind: str) -> InlineKeyboardMarkup:
     rows, row = [], []
     for i, name in enumerate(reads[:24]):
         mark = "• " if name == current else ""
-        row.append(InlineKeyboardButton(f"{mark}{name}"[:26],
-                                        callback_data=f"{kind}:{i}"))
+        row.append(InlineKeyboardButton(
+            f"{mark}{name}"[:26],
+            callback_data=f"{kind}:{read_token(reads, i, kind)}"))
         if len(row) == 2:
             rows.append(row)
             row = []
@@ -191,9 +212,6 @@ def alerts_keyboard(prefs: dict) -> InlineKeyboardMarkup:
         else:
             text = f"{'🔔' if prefs.get(key) else '🔕'} {label}"
         rows.append([InlineKeyboardButton(text, callback_data=f"pref:{key}")])
-    rows.append([InlineKeyboardButton(
-        f"🎨 map colours: {prefs.get('cmap', 'viridis')}",
-        callback_data="menu:cmap")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -421,7 +439,7 @@ async def _picture(update, context, kind: str, asked: str = None,
         maps = (snapshot or {}).get("maps") or {}
         photo = await asyncio.to_thread(
             render.safe_render, render.render_map, maps.get(read) or {},
-            read, heading, subtitle, prefs.get("cmap", "viridis"))
+            read, heading, subtitle, (snapshot or {}).get("cmap", ""))
         missing = ("No map for that one yet — a map needs a 2-D or 3-D "
                    "sweep with at least one finished line.")
     else:
@@ -486,44 +504,22 @@ async def on_button(update: Update,
     data = query.data or ""
 
     if data.startswith("line:") or data.startswith("map:"):
-        kind, _, index = data.partition(":")
-        await _picture(update, context, kind, asked=index, query=query)
+        kind, _, picked = data.partition(":")
+        await _picture(update, context, kind, asked=picked, query=query)
         return
 
     if data.startswith("pref:"):
         await _toggle(update, context, query, chat_id, data.split(":", 1)[1])
         return
 
-    if data == "menu:cmap":
-        rows, row = [], []
-        for name in render.CMAPS:
-            row.append(InlineKeyboardButton(name, callback_data=f"cmap:{name}"))
-            if len(row) == 3:
-                rows.append(row)
-                row = []
-        if row:
-            rows.append(row)
-        rows.append([InlineKeyboardButton("↩︎ back",
-                                          callback_data="pref:none")])
-        await safe_edit(query, "Colours for maps:", InlineKeyboardMarkup(rows))
-        return
 
-    if data.startswith("cmap:"):
-        await _toggle(update, context, query, chat_id, "cmap",
-                      value=data.split(":", 1)[1])
-        return
-
-
-async def _toggle(update, context, query, chat_id: int, key: str,
-                  value=None) -> None:
+async def _toggle(update, context, query, chat_id: int, key: str) -> None:
     link, err = await _active_link(chat_id)
     if err:
         await safe_edit(query, err)
         return
     prefs = prefs_of(link)
-    if key == "cmap" and value in render.CMAPS:
-        prefs["cmap"] = value
-    elif key == "progress":
+    if key == "progress":
         cycle = [0, 15, 30, 60, 120]
         current = int(prefs.get("progress_min") or 0)
         nxt = cycle[(cycle.index(current) + 1) % len(cycle)] \
@@ -532,7 +528,7 @@ async def _toggle(update, context, query, chat_id: int, key: str,
         prefs["progress"] = nxt > 0
     elif key in DEFAULT_PREFS:
         prefs[key] = not bool(prefs.get(key))
-    elif key != "none":
+    else:                          # a keyboard from an older version
         return
     if not await asyncio.to_thread(db.link_save_prefs, link["rig_id"],
                                    chat_id, prefs):

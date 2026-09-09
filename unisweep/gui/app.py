@@ -81,6 +81,7 @@ class App:
         self.tg_link = TelegramLink(
             live_data=self.live_data, live_maps=self.live_maps,
             program_getter=lambda: self.live.get() if self.live else None,
+            cmap_getter=self._map_cmap,
             status_cb=lambda text, state: self.event_queue.put(
                 ("tg_status", text, state)),
             command_cb=lambda cid, kind: self.event_queue.put(
@@ -287,30 +288,48 @@ class App:
 
     @staticmethod
     def _logo_path() -> str:
-        """logo.ico, found relative to the package rather than the cwd —
-        the app is started from anywhere."""
+        """The window icon, found relative to the package rather than the
+        cwd — the app is started from anywhere. Either format: .ico is
+        what Windows wants, .png is what everything else wants, and the
+        file in the repo has been both."""
         here = os.path.dirname(os.path.dirname(os.path.dirname(
             os.path.abspath(__file__))))
-        path = os.path.join(here, "logo.ico")
-        return path if os.path.exists(path) else ""
+        for name in ("logo.ico", "logo.png"):
+            path = os.path.join(here, name)
+            if os.path.exists(path):
+                return path
+        return ""
 
     def _apply_window_icon(self) -> None:
-        """Windows takes the .ico directly; X11 does not, so fall back to
-        Pillow and iconphoto. An app without an icon is not a reason to
-        fail to start, so every step is optional."""
+        """A .ico goes straight to ``iconbitmap`` — that is the call
+        Windows uses for the title bar and the taskbar. A .png does not,
+        but Tk 8.6 reads PNG into a PhotoImage natively, so ``iconphoto``
+        takes it without Pillow; Pillow is only the last resort. An app
+        without an icon still starts, so every step is optional."""
         path = self._logo_path()
         if not path:
             return
+        if path.lower().endswith(".ico"):
+            try:
+                self.root.iconbitmap(default=path)
+                return
+            except Exception:                      # noqa: BLE001
+                pass
         try:
-            self.root.iconbitmap(default=path)
+            image = tk.PhotoImage(file=path)
+            factor = max(image.width(), image.height()) // 128
+            if factor > 1:                         # a 1024 px logo would
+                image = image.subsample(factor)    # else be scaled by Tk
+            self._icon_image = image
+            self.root.iconphoto(True, self._icon_image)
             return
         except Exception:                          # noqa: BLE001
             pass
         try:
             from PIL import Image, ImageTk
-            image = Image.open(path)
-            image.thumbnail((128, 128))
-            self._icon_image = ImageTk.PhotoImage(image)
+            picture = Image.open(path)
+            picture.thumbnail((128, 128))
+            self._icon_image = ImageTk.PhotoImage(picture)
             self.root.iconphoto(True, self._icon_image)
         except Exception:                          # noqa: BLE001
             pass
@@ -370,7 +389,7 @@ class App:
         """Feature: settings applied to a map window are applied to the
         saved .png (and .gif) files of that read as well."""
         from ..core.maps import restyle_saved_images
-        data_dir = getattr(self, "_last_data_dir", "")
+        data_dir = getattr(self, "_last_day_dir", "")
         if not data_dir or not config.zcol:
             self.status("no saved map images for this sweep yet")
             return
@@ -536,6 +555,15 @@ class App:
             rig_name=st.tg_rig_name or self._default_rig_name(),
             allow_control=st.tg_allow_control,
             push_s=st.tg_push_s, snapshot_s=st.tg_snapshot_s)
+
+    def _map_cmap(self) -> str:
+        """The colour scale the map windows use, for pictures sent out.
+
+        Read from the link thread, and the plot manager is built after the
+        link, so this must survive being asked too early.
+        """
+        plots = getattr(self, "plots", None)
+        return plots.map_cmap() if plots is not None else ""
 
     @staticmethod
     def _default_rig_name() -> str:
@@ -873,7 +901,14 @@ class App:
         elif isinstance(event, ev.FileOpened):
             self._run_file = os.path.basename(event.path)
             self.live_data.new_file(event.path)
-            self._last_data_dir = os.path.dirname(event.path)
+            # The maps sit in <YYMMDD>/2d_maps, a sibling of data_files,
+            # so remember the DAY folder — the same derivation MapWriter
+            # uses. Remembering the data_files folder instead sent every
+            # restyle looking under data_files/2d_maps, which does not
+            # exist: "apply the settings to the saved images" then found
+            # nothing and changed nothing, whatever style was chosen.
+            from ..core.maps import day_dir_for
+            self._last_day_dir = day_dir_for(event.path)
             self.file_label.configure(text=event.path)
         elif isinstance(event, ev.PointMeasured):
             self.live_data.add_row(event.row, event.axis_values,

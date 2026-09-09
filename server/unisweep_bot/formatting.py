@@ -81,9 +81,12 @@ DEFAULT_PREFS = {
     "silent": True,
     "photo": False,
     "progress_min": 0,          # 0 = off, otherwise minutes between pings
-    "cmap": "viridis",
     "read": "",                 # last parameter this chat plotted
 }
+#: Deliberately absent: the map colour scale.  A map in the chat should
+#: look like the map on the screen, so the rig reports which scale its own
+#: window is drawing with and the server obeys it — a second, per-chat
+#: choice would only be a way to disagree with the instrument.
 
 
 def prefs_of(link: dict) -> dict:

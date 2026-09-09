@@ -50,10 +50,28 @@ INK_2 = "#52514e"
 GRID = "#dedcd6"
 
 #: perceptually uniform, monotone in lightness and colour-blind safe; it is
-#: also what the desktop map window defaults to
+#: also what the desktop map window defaults to.  Used when the rig has not
+#: said which scale its own map window is drawing with.
 DEFAULT_CMAP = "viridis"
-CMAPS = ["viridis", "plasma", "inferno", "magma", "cividis", "coolwarm",
-         "Greys", "jet"]
+
+
+def known_cmap(name: str) -> str:
+    """The rig's colour scale if matplotlib has one by that name.
+
+    The desktop offers scales this module has never heard of, and will
+    grow more; asking matplotlib is both shorter and always current than
+    keeping a second list in step.  Anything unrecognised — an old
+    snapshot, a typo in a saved template — quietly becomes the default
+    rather than raising inside a render.
+    """
+    name = (name or "").strip()
+    if not name:
+        return DEFAULT_CMAP
+    try:
+        matplotlib.colormaps[name]                     # noqa: B018
+        return name
+    except (KeyError, ValueError, AttributeError):
+        return DEFAULT_CMAP
 
 #: Sized for a phone, not a paper.  Telegram shows a photo about 800 px
 #: wide, so rendering larger costs bytes and buys nothing; the type sizes
@@ -234,8 +252,7 @@ def render_map(map_obj: dict, read: str, title: str, subtitle: str = "",
 
     fig, ax = _new_figure(width=8.0, height=5.0)
     ax.grid(False)
-    if cmap not in CMAPS:
-        cmap = DEFAULT_CMAP
+    cmap = known_cmap(cmap)
     # The first committed row of a 2-D sweep is a map one line tall, and
     # it is worth showing — but a mesh needs two rows to have a height,
     # so that line is drawn as a band around its own value.
