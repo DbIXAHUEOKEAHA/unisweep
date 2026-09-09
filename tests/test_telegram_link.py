@@ -162,6 +162,63 @@ def test_events_are_composed_and_kept_until_delivered():
     assert "57 points" in link._events[2]["text"]
 
 
+def test_a_finished_sweep_does_not_wait_for_the_next_heartbeat():
+    """The bug this exists for: the loop only pushed at `next_push`, so a
+    sweep that ended one second after a heartbeat sat there for the rest
+    of the interval — and for up to five minutes if the network had been
+    flaky, because the back-off deadline applied too."""
+    link = _link()
+    link.on_event(ev.PointMeasured(row=(1.0,), axis_values=(1.0,), file="f"))
+    assert not link._urgent                # ordinary traffic can wait
+    link.on_event(ev.SweepFinished(stopped=False, points=10))
+    assert link._urgent                    # this cannot
+    for junk in (ev.SweepError(where="x", message="y", fatal=True),
+                 ev.GuardTripped(source="s", action="stop", message="m",
+                                 values={}, axis_values=(), applied=True)):
+        link._urgent = False
+        link.on_event(junk)
+        assert link._urgent, junk
+
+
+def test_the_urgent_flag_clears_only_once_everything_is_delivered():
+    link = _link()
+    link.on_event(ev.SweepFinished(stopped=False, points=3))
+    _patched(_Server({"ok": True}), link._push)
+    assert not link._events and not link._urgent
+
+
+def test_closing_unisweep_reports_the_sweep_as_over():
+    """Shutting the window ends the measurement, so it is announced as an
+    ending rather than left for the server to guess at from silence."""
+    link = _link()
+    link.on_event(ev.SweepStarted(columns=("time", "A_sweep", "R"),
+                                  dimensions=1, planned_points=100))
+    link.on_event(ev.Progress(done=42, total=100))
+    link._events.clear()
+    link.note_shutdown()
+    assert [e["kind"] for e in link._events] == ["finished"]
+    text = link._events[0]["text"]
+    # it reads like any other ending — how it ended is not the headline
+    assert "Sweep ended" in text and "42 points" in text
+    assert "closed" not in text and "Unisweep" not in text
+    assert link._state == "idle"
+    # and it is not said twice if the engine already finished properly
+    link._events.clear()
+    link.note_shutdown()
+    assert not link._events
+
+
+def test_a_normal_finish_is_not_relabelled_as_a_close():
+    link = _link()
+    link.on_event(ev.SweepStarted(columns=("time", "A_sweep", "R"),
+                                  dimensions=1, planned_points=100))
+    link.on_event(ev.SweepFinished(stopped=False, points=100))
+    link.note_shutdown()
+    kinds = [e["kind"] for e in link._events]
+    assert kinds == ["started", "finished"], kinds
+    assert "Sweep finished" in link._events[-1]["text"]
+
+
 def test_event_queue_is_bounded():
     link = _link()
     for i in range(400):
@@ -353,7 +410,7 @@ def _sweep_2d(rows=6, points=25):
     return link, data, maps
 
 
-def test_snapshot_carries_trace_table_stats_and_maps():
+def test_snapshot_carries_trace_stats_and_maps():
     link, _data, _maps = _sweep_2d(rows=5, points=30)
     snap = link._build_snapshot()
 
@@ -369,10 +426,9 @@ def test_snapshot_carries_trace_table_stats_and_maps():
     assert set(trace["series"]) == {"LOCKIN.X", "LOCKIN.Y"}
     assert len(trace["series"]["LOCKIN.X"]) == 30
 
-    table = snap["table"]
-    assert table["columns"][0] == "time"
-    assert table["total"] == 150
-    assert len(table["rows"]) == 15 and len(table["rows"][0]) == 5
+    # the latest numbers ride on the heartbeat's last row, so the snapshot
+    # carries no copy of the table — nothing on the server reads one
+    assert "table" not in snap
 
     stats = snap["stats"]["LOCKIN.X"]
     assert stats["n"] == 150

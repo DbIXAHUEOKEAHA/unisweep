@@ -48,7 +48,6 @@ class App:
         self.root = tk.Tk()
         self.root.title("Unisweep")
         self.root.minsize(1100, 700)
-        self._apply_window_icon()
         self.settings = AppSettings.load(core_dir)
         _theme.init_theme(self.settings.theme)
         apply_theme(self.root)
@@ -185,52 +184,6 @@ class App:
         self._wizard = None
         self.root.after(300, self._maybe_run_setup)
         self.root.after(1200, lambda: self.refresh_catalog_async())
-
-    # ---------------- window icon ---------------------------------------
-    @staticmethod
-    def _logo_path() -> str:
-        """``logo.ico``, next to main.py — beside the package when the
-        application is run from a checkout, and beside the executable
-        when it is not."""
-        package = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        for candidate in (os.path.join(os.path.dirname(package), "logo.ico"),
-                          os.path.join(package, "logo.ico")):
-            if os.path.exists(candidate):
-                return candidate
-        return ""
-
-    def _apply_window_icon(self) -> None:
-        """Put logo.ico on the window, and on every window that follows.
-
-        ``default=True`` is the point: the plot windows, the settings
-        dialogs and the setup wizard are all Toplevels, and this way they
-        inherit the icon instead of each needing to remember it.
-
-        Windows reads .ico directly. X11 cannot, so there it falls back to
-        a PhotoImage through Pillow, which matplotlib already brings in.
-        Neither is worth failing over — a missing or unreadable logo must
-        never be the reason the application will not start.
-        """
-        path = self._logo_path()
-        if not path:
-            return
-        try:
-            self.root.iconbitmap(default=path)
-            return
-        except Exception:                          # noqa: BLE001
-            pass                                   # not Windows, or no .ico
-        try:
-            from PIL import Image, ImageTk
-            image = Image.open(path)
-            # the .ico carries a 1254px master; window managers want
-            # something the size of a title bar, not a poster
-            image.thumbnail((128, 128))
-            #: kept on the instance: Tk holds no reference of its own and
-            #: a garbage-collected PhotoImage silently blanks the icon
-            self._icon_image = ImageTk.PhotoImage(image)
-            self.root.iconphoto(True, self._icon_image)
-        except Exception:                          # noqa: BLE001
-            pass
 
     # ---------------- assistant endpoint --------------------------------
     def start_agent_endpoint(self) -> bool:
@@ -397,9 +350,7 @@ class App:
 
         def work():
             n = restyle_saved_images(data_dir, config.zcol, vmin, vmax,
-                                     labels, title=config.title,
-                                     cmap=config.cmap,
-                                     ztransform=config.ztransform)
+                                     labels, title=config.title)
             self.event_queue.put(
                 ("notify_result",
                  f"plot settings applied to {n} saved image(s)"
@@ -627,6 +578,22 @@ class App:
                 pass
         import threading as _th
         _th.Thread(target=work, daemon=True).start()
+
+    def _drain_to_telegram(self) -> None:
+        """Hand the link whatever is left in the queue, without the GUI.
+
+        Only the link is fed: the widgets are being torn down, so running
+        the normal handlers here would be a race for no benefit.
+        """
+        while True:
+            try:
+                event = self.event_queue.get_nowait()
+            except queue.Empty:
+                return
+            except Exception:                          # noqa: BLE001
+                return
+            if not isinstance(event, tuple):
+                self.tg_link.on_event(event)
 
     def _telegram_command(self, command_id, kind: str) -> None:
         """Run a command the bot sent, on the GUI thread.
@@ -967,8 +934,15 @@ class App:
         except tk.TclError:
             pass
         self.stop_agent_endpoint()
-        # a last heartbeat is worth waiting a moment for: it is what stops
-        # the server announcing "the rig went silent" after a clean quit
+        # Whatever the engine emitted since the last pump — the
+        # sweep-ended event most of all — has to reach the link before it
+        # shuts down.  We are inside a Tk callback and the pump has just
+        # been cancelled, so nothing else will ever drain it: this is
+        # exactly the "it never told me the sweep finished" case.
+        self._drain_to_telegram()
+        # a last heartbeat is worth waiting a moment for: it carries that
+        # event, and it is what stops the server reporting a clean quit as
+        # a computer that went quiet
         self.tg_link.stop(join=2.0)
         self.plots.shutdown()
         self.setget_plots.shutdown()

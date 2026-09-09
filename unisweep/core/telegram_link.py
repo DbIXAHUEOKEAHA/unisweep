@@ -91,11 +91,25 @@ MAX_TRACE_POINTS = 800
 MAX_MAP_ROWS = 160
 MAX_MAP_COLS = 160
 MAX_MAP_READS = 6
-TABLE_ROWS = 15
 #: never queue notifications without bound if the service is unreachable
 MAX_PENDING_EVENTS = 200
 MAX_BACKOFF_S = 300.0
 IDLE_PUSH_S = 60.0
+
+#: Events nobody should wait a heartbeat for.  These go out on the next
+#: turn of the loop instead of at the next scheduled push — the whole
+#: point of the thing is that "your sweep finished" arrives when the
+#: sweep finishes, not up to a quarter of a minute later.
+URGENT_KINDS = {"finished", "error", "guard"}
+
+#: While something urgent is waiting — or a sweep is running at all — a
+#: failed push retries within this long however many failures came
+#: before.  The plain exponential back-off climbs to five minutes, which
+#: is the right answer for an idle rig and completely the wrong one for a
+#: sweep that has just ended: it is what turns "finished" into
+#: "finished, eventually".  It also has to stay comfortably under the
+#: server's silence grace, or a blip would be read as a crash.
+URGENT_BACKOFF_S = 60.0
 
 
 def new_rig_identity() -> tuple:
@@ -214,6 +228,7 @@ class TelegramLink:
         self._run_started: Optional[float] = None
         self._snapshot_due = 0.0
         self._force_snapshot = False
+        self._urgent = False
         self._results: deque = deque()
 
     # ------------------------------------------------------------ config --
@@ -266,6 +281,32 @@ class TelegramLink:
                 self.link_status = "off"
         self._status("monitoring stopped")
 
+    def note_shutdown(self) -> None:
+        """Unisweep is closing, so the sweep is over.
+
+        Closing the window — on purpose or by accident — ends the
+        measurement, so it is reported as an ending rather than left for
+        the server's silence watchdog to guess at several minutes later.
+        Worded exactly like any other ending: *why* it ended is not what
+        somebody reading their phone wants from the first line.  If the
+        engine already emitted its own finish, ``_state`` is no longer
+        running and this adds nothing.
+        """
+        with self._lock:
+            if self._state not in ("running", "paused"):
+                return
+            elapsed = (time.time() - self._run_started
+                       if self._run_started else
+                       (self._progress or {}).get("elapsed_s") or 0)
+            points = int((self._progress or {}).get("done") or 0)
+            counted = f"{points:,}".replace(",", " ")
+            self._queue(
+                "finished",
+                f"⛔ Sweep ended — {_fmt_duration(elapsed)}, "
+                f"{counted} points"
+                + (f"\n{_basename(self._file)}" if self._file else ""))
+            self._state = "idle"
+
     def _final_push(self) -> None:
         """One last heartbeat as the application closes.
 
@@ -274,6 +315,7 @@ class TelegramLink:
         clean quit is not announced as "the rig went silent", which is
         what the watchdog on the server is for.
         """
+        self.note_shutdown()
         with self._lock:
             if self.link_status != "active":
                 return
@@ -408,6 +450,8 @@ class TelegramLink:
         self._seq += 1
         self._events.append({"seq": self._seq, "kind": kind,
                              "text": text, "ts": time.time()})
+        if kind in URGENT_KINDS:
+            self._urgent = True
         while len(self._events) > MAX_PENDING_EVENTS:
             self._events.popleft()
             self._dropped += 1
@@ -425,7 +469,15 @@ class TelegramLink:
         next_push = 0.0
         next_hello = 0.0
         while not self._stop.is_set():
+            # Cleared before the work, never after it: an event arriving
+            # mid-push then leaves the flag set and the next turn picks it
+            # up immediately.  Clearing afterwards swallows that wake-up,
+            # and the notification waits for the timeout instead.
+            self._wake.clear()
             now = time.time()
+            with self._lock:
+                urgent = self._urgent
+                busy = self._state in ("running", "paused")
             try:
                 if self.link_status in ("connecting", "error") \
                         and now >= next_hello:
@@ -433,7 +485,8 @@ class TelegramLink:
                     # into a request every couple of seconds
                     next_hello = now + 30.0
                     self._hello()
-                if self.link_status == "active" and now >= next_push:
+                if self.link_status == "active" and (urgent
+                                                     or now >= next_push):
                     self._push()
                     failures = 0
                     with self._lock:
@@ -442,8 +495,10 @@ class TelegramLink:
                     next_push = time.time() + interval
             except Exception as exc:                   # noqa: BLE001
                 failures += 1
-                delay = min(MAX_BACKOFF_S, self.push_s * (2 ** min(failures,
-                                                                   5)))
+                delay = min(MAX_BACKOFF_S,
+                            self.push_s * (2 ** min(failures, 5)))
+                if urgent or busy:
+                    delay = min(delay, URGENT_BACKOFF_S)
                 next_push = time.time() + delay
                 with self._lock:
                     self.last_error = f"{type(exc).__name__}: {exc}"
@@ -453,7 +508,6 @@ class TelegramLink:
                              f"({self.last_error}) — retrying in "
                              f"{_fmt_duration(delay)}")
             self._wake.wait(timeout=2.0)
-            self._wake.clear()
 
     # ---------------------------------------------------------------- HTTP --
     def _post(self, path: str, payload: dict, headers: dict = None) -> dict:
@@ -584,6 +638,8 @@ class TelegramLink:
             self.last_push_ok = time.time()
             self.link_status = "active"
             self.last_error = ""
+            if not self._events:
+                self._urgent = False
             # the roster travels on every heartbeat, so somebody unlinking
             # in Telegram shows up on the Settings page without asking
             if reply.get("roster_known"):
@@ -701,7 +757,6 @@ class TelegramLink:
                    "dimensions": dims, "reads": list(reads),
                    "file": file_name, "at": time.time(),
                    "trace": self._trace(data, columns, dims, reads),
-                   "table": self._table(data, columns),
                    "stats": self._stats(data, reads),
                    "maps": self._map_payload(maps, columns, dims, reads)}
             return out
@@ -738,16 +793,6 @@ class TelegramLink:
                 "x": [_num(x[i]) for i in keep],
                 "series": series,
                 "points": len(x)}
-
-    def _table(self, data, columns) -> dict:
-        total = len(data)
-        if not total:
-            return {}
-        cols = list(columns)
-        values = {c: list(data.column(c, last=TABLE_ROWS)) for c in cols}
-        n = min((len(v) for v in values.values()), default=0)
-        rows = [[_num(values[c][i]) for c in cols] for i in range(n)]
-        return {"columns": cols, "rows": rows, "total": total}
 
     def _stats(self, data, reads) -> dict:
         out = {}

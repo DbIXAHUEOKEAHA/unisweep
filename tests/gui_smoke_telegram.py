@@ -40,6 +40,8 @@ class FakeLink:
     """Stands in for TelegramLink — no sockets, no threads."""
 
     def __init__(self):
+        self.seen = []
+        self.shutdown_noted = False
         self.links = []
         self.bot_link = "https://t.me/unisweep_lab_bot"
         self.bot_username = "unisweep_lab_bot"
@@ -56,6 +58,8 @@ class FakeLink:
 
     def stop(self, join=0, final_push=True):
         self.started = False
+        if final_push:
+            self.shutdown_noted = True
 
     def summary(self):
         return f"monitoring · {len(self.links)} Telegram user(s) linked"
@@ -77,7 +81,7 @@ class FakeLink:
         pass
 
     def on_event(self, event):
-        pass
+        self.seen.append(type(event).__name__)
 
 
 def _toplevels(app):
@@ -188,6 +192,16 @@ def main() -> int:
         assert "already called" in _boxes[-1][2], _boxes[-1]
         assert "ATTODRY-1" in _boxes[-1][2], _boxes[-1]
 
+    def closing_reports_the_sweep():
+        """The bug: the engine's SweepFinished lands in the queue, the
+        pump is cancelled, and the notification is built and binned."""
+        from unisweep.core import events as ev
+        app.event_queue.put(ev.SweepFinished(stopped=False, points=99))
+        app.event_queue.put(("tg_status", "x", "active"))   # not an event
+        app._drain_to_telegram()
+        assert app.tg_link.seen == ["SweepFinished"], app.tg_link.seen
+        assert app.event_queue.empty()
+
     app.tg_link = FakeLink()
     check("the notifications card is on screen", default_mode)
     check("the ? button opens the help window", help_popup)
@@ -198,6 +212,8 @@ def main() -> int:
     check("only the necessary boxes are left", only_the_necessary_boxes)
     check("settings survive a round trip through disk", persistence)
     check("a clashing setup name is explained", name_clash_is_explained)
+    check("closing hands the sweep-ended event to the link",
+          closing_reports_the_sweep)
 
     app.root.update_idletasks()
     print(f"\n{len(failed)} failed")

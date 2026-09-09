@@ -122,16 +122,6 @@ def test_status_text_reports_state_progress_and_readings():
         assert word not in text, word
 
 
-def test_table_text_shows_the_tail():
-    snapshot = {"table": {"columns": ["time", "A", "B"],
-                          "rows": [[i, i * 0.5, None] for i in range(30)],
-                          "total": 900}}
-    text = fmt.table_text(snapshot, rows=5)
-    assert text.count("\n") >= 5
-    assert "of 900 rows" in text
-    assert fmt.table_text({}, 5) == "No rows yet."
-
-
 def test_rig_line_marks_a_rig_that_stopped_reporting():
     from datetime import datetime, timedelta, timezone
     fresh = {"rig_name": "A", "state": {"state": "running"},
@@ -248,16 +238,77 @@ def test_every_rig_event_kind_maps_to_a_preference():
         assert kind in ingest.EVENT_PREF
 
 
-def test_the_chat_has_no_buttons_at_all():
-    """Keyboards go stale the moment the sweep moves on, and can't be
-    typed. Everything is a command, so nothing builds a markup."""
+def test_buttons_exist_only_for_picking_and_toggling():
+    """A keyboard is right for choosing from a list and for flipping a
+    switch, and wrong as a stand-in for a command — those go stale and
+    cannot be typed. So: no menu, no navigation, no 'back' to a screen."""
     from unisweep_bot import dispatch, handlers
     import inspect
-    for module in (dispatch, handlers):
-        source = inspect.getsource(module)
-        assert "InlineKeyboard" not in source, module.__name__
-        assert "reply_markup" not in source, module.__name__
-    assert not hasattr(handlers, "on_button")
+    # notifications the bot pushes are plain text; nobody taps a
+    # three-day-old "sweep finished" message
+    assert "InlineKeyboard" not in inspect.getsource(dispatch)
+
+    data = []
+    for kind in ("line", "map"):
+        markup = handlers.reads_keyboard(["A", "B"], "A", kind)
+        data += [b.callback_data
+                 for row in markup.inline_keyboard for b in row]
+    markup = handlers.alerts_keyboard(fmt.prefs_of({}))
+    data += [b.callback_data for row in markup.inline_keyboard for b in row]
+    # the colour list is built inside on_button, so that one is read
+    data += _callback_data(handlers)
+
+    assert data, "the pickers lost their keyboards"
+    for item in data:
+        head = item.split(":")[0]
+        assert head in ("line", "map", "pref", "cmap", "menu"), item
+    # the only "menu:" left is the colour picker, not a screen to go back to
+    assert sorted({d for d in data if d.startswith("menu:")}) == ["menu:cmap"]
+
+
+def _callback_data(module):
+    """Callback strings spelled out in the source.
+
+    Ones built from a variable (``f"{kind}:{i}"``) are covered by building
+    the keyboard itself, so they are skipped rather than half-read.
+    """
+    import inspect
+    import re
+    found = re.findall(r'callback_data=f?"([^"]*)"', inspect.getsource(module))
+    return [d for d in found if "{" not in d.split(":")[0]]
+
+
+def test_every_button_has_a_typed_equivalent():
+    """Nothing may depend on a tap: a keyboard older than 48 h cannot be
+    edited, and Telegram search does not find buttons."""
+    from unisweep_bot import handlers
+    # parameters: the picker and `/line LOCKIN.Y` reach the same code
+    assert handlers._pick_read(["A", "B"], "2", "") == "B"
+    # switches: the keyboard and `/alerts errors off` set the same field
+    assert fmt.pref_key("errors") == "error"
+    assert callable(handlers.alerts) and callable(handlers.on_button)
+
+
+def test_the_parameter_picker_marks_the_current_one():
+    from unisweep_bot.handlers import reads_keyboard
+    markup = reads_keyboard(["LOCKIN.X", "LOCKIN.Y"], "LOCKIN.Y", "line")
+    labels = [b.text for row in markup.inline_keyboard for b in row]
+    assert labels == ["LOCKIN.X", "• LOCKIN.Y"], labels
+    data = [b.callback_data for row in markup.inline_keyboard for b in row]
+    assert data == ["line:0", "line:1"], data
+    assert all(len(d.encode()) <= 64 for d in data)
+
+
+def test_the_alerts_keyboard_shows_every_switch():
+    from unisweep_bot.handlers import alerts_keyboard
+    prefs = fmt.prefs_of({})
+    markup = alerts_keyboard(prefs)
+    data = [b.callback_data for row in markup.inline_keyboard for b in row]
+    for key in fmt.KIND_LABEL:
+        assert f"pref:{key}" in data, key
+    labels = [b.text for row in markup.inline_keyboard for b in row]
+    assert any("🔔" in t for t in labels) and any("🔕" in t for t in labels)
+    assert any("progress updates: off" in t for t in labels)
 
 
 def test_parameter_names_can_be_typed_the_lazy_way():

@@ -23,20 +23,18 @@ Telegram users**, and the bot writes to you from then on. Anyone else does
 the same with their own code; each person's notification choices are their
 own.
 
-One person can be linked to as many setups as they like — `/rigs` in the
-chat switches between them, and every question (`/status`, `/plot`, …)
-answers about whichever one is selected.
+One person can be linked to as many setups as they like — `/setups` switches
+between them, and every question (`/status`, `/line`, …) answers about
+whichever one is selected.
 
 **The setup's name must be unique across the lab.** It is how people tell
 setups apart in the chat, so a second "ATTODRY" is refused and the Settings
 page says so; give it a different name and try again.
 
-Everything else lives in the chat. There are no buttons — buttons go stale
-the moment the sweep moves on, and cannot be typed:
+Everything else lives in the chat. Commands do the asking:
 
 ```
-/status    how the sweep is going
-/data      the latest numbers
+/status    how the sweep is going, and the latest numbers
 /line      line scan of one parameter
 /map       2-D map of one parameter
 /stats     smallest, largest, average
@@ -46,12 +44,22 @@ the moment the sweep moves on, and cannot be typed:
 /help      the list above
 ```
 
-None of them needs an argument. `/line` draws whatever you looked at last;
-`/line lockin.y`, `/line curr` or `/line 2` picks another one — any case,
-part of the name, or its position in the list.
+None of them needs an argument. Buttons do the picking: `/line` draws
+whatever you looked at last and lists the other parameters underneath —
+tap one and the picture is swapped in place rather than piling up a new
+message. `/alerts` does the same for the switches: each one is a button
+that flips between 🔔 and 🔕.
 
-`/alerts` on its own shows what is on. `/alerts errors off` changes one,
-`/alerts progress 30` asks for an update every half hour.
+Anything a button does can also be typed, which matters because a keyboard
+more than two days old can no longer be edited and Telegram's search does
+not find buttons. `/line lockin.y`, `/line curr` or `/line 2` picks a
+parameter — any case, part of the name, or its position in the list.
+`/alerts errors off` flips a switch and `/alerts progress 30` asks for an
+update every half hour.
+
+What there is *not* is a keyboard standing in for a command: no menu, no
+navigation, no "back to the main screen". Notifications the bot sends you
+carry no buttons at all — nobody taps a three-day-old "sweep finished".
 
 With remote control allowed there is also `/pause`, `/resume`, `/stop` and
 `/zero`. Stopping asks twice: send the same command again within a minute.
@@ -89,8 +97,7 @@ sweep (once a minute when idle):
 * the latest measured row;
 * about once a minute, a **decimated copy** of what the live plots are
   showing: the current fast-axis walk (≤ 800 points), the map matrices
-  (≤ 160 × 160 per read), the last fifteen rows of the table, and
-  per-parameter statistics.
+  (≤ 160 × 160 per read), and per-parameter statistics.
 
 Plots are drawn on the server from that copy, which is why asking for a
 different parameter is instant and costs the measurement computer nothing.
@@ -127,9 +134,9 @@ address; neither is needed in normal use.
 ### Remote control
 
 **Allow pause / stop / ramp-to-zero from Telegram** is off by default. With
-it on, a linked person can do exactly three things, after a confirmation
-tap: pause/resume, stop, or stop and ramp to zero — the same buttons as the
-Sweep page. The bot can never set a value, change a sweep, or start one, and
+it on, a linked person can do exactly three things: pause/resume, stop, or
+stop and ramp to zero — the same buttons as the Sweep page. Stopping asks
+twice. The bot can never set a value, change a sweep, or start one, and
 every action is reported back to whoever pressed it.
 
 ---
@@ -147,10 +154,11 @@ with a growing delay and nothing is lost: notifications stay queued until
 they get through, and each carries a sequence number so a retry after a
 timeout cannot produce a duplicate message.
 
-**The bot says a setup "went silent"** — it was sweeping and stopped
-reporting for four minutes. Usually the computer slept, lost its network, or
-crashed. Quitting Unisweep normally does *not* trigger this: it sends a
-final heartbeat on the way out.
+**"Sweep ended — last update 4 m ago"** — the setup was sweeping and stopped
+reporting. Closing Unisweep ends the measurement, so that is what it says;
+the timestamp is there for the times it was really a sleeping laptop or a
+dropped network. Quitting Unisweep normally sends a proper sweep-ended
+message on the way out and never reaches this path.
 
 ---
 

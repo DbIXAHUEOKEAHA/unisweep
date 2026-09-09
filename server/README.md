@@ -16,8 +16,7 @@ notices and says so.
 
 | In Telegram | |
 |---|---|
-| `/status` | state, progress, the latest readings |
-| `/data` | the most recent measured rows |
+| `/status` | state, progress, and the latest measured row |
 | `/line` | one parameter against the **fast (innermost) axis**, as a PNG |
 | `/map` | one parameter over the 2-D grid, as a PNG |
 | `/stats` | min / max / mean / last per parameter |
@@ -26,9 +25,18 @@ notices and says so.
 | `/pause` `/resume` `/stop` `/zero` | only if the setup allows it; stopping asks twice |
 | `/unlink`, `/help`, `/id` | |
 
-No inline keyboards anywhere, and no `/link`: six digits *is* a pairing
-code, so the plain-text handler takes it. The older command names
-(`/table`, `/plot`, `/rigs`, `/notify`, `/menu`) still work as aliases.
+Commands ask; keyboards pick. `/line` and `/map` hang the parameter list
+under the picture and swap it in place on a tap; `/alerts` is a column of
+🔔/🔕 switches. That is all a keyboard is used for — choosing from a list
+and flipping a switch. There is no menu, no navigation, no "back", and the
+notifications the bot pushes carry no buttons at all, because a keyboard
+older than 48 h can no longer be edited and Telegram's search does not find
+buttons. Everything tappable is therefore also typable: `/line lockin.y`,
+`/alerts errors off`.
+
+No `/link`: six digits *is* a pairing code, so the plain-text handler takes
+it. The older command names (`/plot`, `/rigs`, `/notify`, `/menu`) still
+work as aliases.
 
 Unprompted, it writes when a sweep **finishes or is stopped**, when an
 **error or a guard** stops one, and when a setup that was sweeping **stops

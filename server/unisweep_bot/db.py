@@ -329,17 +329,27 @@ def rig_seen(rig_id: str, state: dict, sweep_state: str) -> bool:
 
 
 def rigs_gone_silent(grace_s: float) -> Optional[list]:
-    """Rigs that were mid-sweep and have stopped reporting.
+    """Setups that were mid-sweep and have stopped reporting.
 
-    ``silent_since`` is stamped by this same statement, so each silence is
-    announced exactly once however often the watchdog runs.
+    Unisweep closing — on purpose or otherwise — ends the measurement, so
+    the state is moved to ``ended`` here rather than left saying
+    ``running`` forever.  Otherwise /status keeps cheerfully reporting a
+    sweep that stopped hours ago.
+
+    ``silent_since`` is stamped by the same statement, so each ending is
+    announced exactly once however often the watchdog runs, and a setup
+    that comes back clears it on its next heartbeat.
     """
     try:
         with _cursor(commit=True) as cur:
             cur.execute(
                 """
                 UPDATE rigs
-                   SET silent_since = now()
+                   SET silent_since = now(),
+                       last_push_state = 'ended',
+                       state = jsonb_set(
+                           COALESCE(state, '{}'::jsonb),
+                           '{state}', '"ended"'::jsonb, true)
                  WHERE silent_since IS NULL
                    AND last_seen IS NOT NULL
                    AND last_push_state IN ('running', 'paused')

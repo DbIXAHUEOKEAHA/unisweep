@@ -17,6 +17,7 @@ from . import config
 
 STATE_ICON = {
     "idle": "⚪",
+    "ended": "⏹",
     "running": "🟢",
     "paused": "🟡",
     "finished": "✅",
@@ -31,7 +32,7 @@ KIND_LABEL = {
     "finished": "when a sweep ends",
     "error": "errors",
     "guard": "safety stops",
-    "silent": "the computer going quiet",
+    "silent": "the computer closing or going quiet",
     "started": "when a sweep starts",
     "paused": "pausing and resuming",
     "file": "every new data file",
@@ -252,34 +253,6 @@ def status_text(link: dict, snapshot: Optional[dict],
     lines.append("")
     lines.append(f"updated {esc(fmt_age(age_seconds(link.get('last_seen'))))}")
     return "\n".join(lines)
-
-
-def table_text(snapshot: dict, rows: int = 12) -> str:
-    """The most recent measured rows."""
-    table = (snapshot or {}).get("table") or {}
-    cols = list(table.get("columns") or [])
-    data = list(table.get("rows") or [])[-rows:]
-    if not cols or not data:
-        return "No rows yet."
-    keep = cols[:8]
-    idx = [cols.index(c) for c in keep]
-    # the writer marks swept columns "<device>.<param>_sweep"; that suffix
-    # is for the file on disk, not for somebody reading a phone
-    shown = [c[:-6] if c.endswith("_sweep") else c for c in keep]
-    widths = [max(len(c), 10) for c in shown]
-    out = ["  ".join(c.rjust(w)[:w] for c, w in zip(shown, widths))]
-    for row in data:
-        cells = []
-        for j, w in zip(idx, widths):
-            cells.append(fmt_value(row[j] if j < len(row) else None)
-                         .rjust(w)[:w])
-        out.append("  ".join(cells))
-    text = "\n".join(out)
-    total = int(table.get("total", len(data)))
-    more = f"\nlast {len(data)} of {total} rows"
-    if len(keep) < len(cols):
-        more += f", {len(keep)} of {len(cols)} columns"
-    return f"<pre>{esc(text)}</pre>{esc(more)}"
 
 
 def stats_text(snapshot: dict) -> str:

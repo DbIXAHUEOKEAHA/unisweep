@@ -21,7 +21,8 @@ from telegram.error import (BadRequest, Forbidden, NetworkError, RetryAfter,
                             TimedOut)
 
 from . import config, db
-from .formatting import esc, fmt_age, age_seconds, split_message
+from .formatting import (age_seconds, esc, fmt_age, prefs_of,
+                         split_message)
 
 logger = logging.getLogger(__name__)
 
@@ -98,11 +99,15 @@ async def dispatch_outbox(context) -> None:
 
 
 async def watch_rigs(context) -> None:
-    """Report rigs that were mid-sweep and stopped reporting.
+    """Report setups that were mid-sweep and stopped reporting.
 
-    An overnight sweep whose computer froze, lost its network or was shut
-    down looks exactly like silence — and silence is the one failure the
-    rig itself can never tell you about.
+    A sweep whose computer froze, lost power or had Unisweep closed out
+    from under it looks exactly like silence — and silence is the one
+    failure the setup itself can never report.  Closing Unisweep ends the
+    measurement, so this reads as an ending and nothing more: the list of
+    things that might have caused it is a paragraph nobody wants at 3
+    a.m., and the timestamp already says as much.  A clean quit sends a
+    proper sweep-ended message on the way out and never reaches here.
     """
     try:
         silent = await asyncio.to_thread(db.rigs_gone_silent,
@@ -115,15 +120,19 @@ async def watch_rigs(context) -> None:
                 continue
             age = fmt_age(age_seconds(rig.get("last_seen")))
             body = (f"<b>{esc(rig.get('name') or rig['rig_id'])}</b>\n"
-                    f"📡 no contact — the rig was sweeping and last reported "
-                    f"{esc(age)}.\nThe measurement computer may have lost "
-                    f"its network, gone to sleep, or crashed.")
+                    f"⏹ Sweep ended — last update {esc(age)}")
+            when = (rig["last_seen"].isoformat()
+                    if rig.get("last_seen") else "0")
             for link in links:
+                prefs = prefs_of(link)
+                # somebody who wants sweep-end messages wants this one: it
+                # is the sweep ending, just not politely
+                if not (prefs.get("silent") or prefs.get("finished")):
+                    continue
                 await asyncio.to_thread(
                     db.outbox_add, int(link["chat_id"]), "silent", body,
-                    f"{rig['rig_id']}:silent:"
-                    f"{rig['last_seen'].isoformat() if rig.get('last_seen') else '0'}"
-                    f":{link['chat_id']}", rig["rig_id"])
+                    f"{rig['rig_id']}:silent:{when}:{link['chat_id']}",
+                    rig["rig_id"])
     except Exception:                                  # noqa: BLE001
         logger.error("watch_rigs failed", exc_info=True)
 

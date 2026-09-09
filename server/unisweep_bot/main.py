@@ -23,8 +23,8 @@ import time
 
 from aiohttp import web
 from telegram import BotCommand
-from telegram.ext import (ApplicationBuilder, CommandHandler,
-                          MessageHandler, filters)
+from telegram.ext import (ApplicationBuilder, CallbackQueryHandler,
+                          CommandHandler, MessageHandler, filters)
 from telegram.request import HTTPXRequest
 
 from . import config, db, dispatch, handlers, ingest
@@ -43,7 +43,6 @@ logger = logging.getLogger("unisweep-bot")
 #: would say it out loud, not the way the code thinks about it.
 COMMANDS = [
     BotCommand("status", "How the sweep is going"),
-    BotCommand("data", "The latest numbers"),
     BotCommand("line", "Line scan of one parameter"),
     BotCommand("map", "2-D map of one parameter"),
     BotCommand("stats", "Smallest, largest, average"),
@@ -120,7 +119,6 @@ def build_application():
     app.add_handler(CommandHandler("status", handlers.status))
     # the older names still work: people who learned them should not have
     # to relearn anything to keep using the bot
-    app.add_handler(CommandHandler(["data", "table"], handlers.data))
     app.add_handler(CommandHandler(["line", "plot"], handlers.line))
     app.add_handler(CommandHandler("map", handlers.map_cmd))
     app.add_handler(CommandHandler("stats", handlers.stats))
@@ -131,6 +129,9 @@ def build_application():
     app.add_handler(CommandHandler("resume", handlers.resume))
     app.add_handler(CommandHandler("stop", handlers.stop))
     app.add_handler(CommandHandler(["zero", "tozero"], handlers.to_zero))
+    # the two places a keyboard beats typing: picking a parameter and
+    # flipping an alert on or off
+    app.add_handler(CallbackQueryHandler(handlers.on_button))
     # last: anything that is not a command.  Six digits is a pairing code,
     # which is what people send after reading one off the screen.
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,
@@ -147,7 +148,7 @@ def main() -> None:
             logger.info("starting…")
             application.run_polling(
                 drop_pending_updates=True,
-                allowed_updates=["message"],
+                allowed_updates=["message", "callback_query"],
                 bootstrap_retries=-1,
             )
             logger.info("stopped cleanly — exiting")
