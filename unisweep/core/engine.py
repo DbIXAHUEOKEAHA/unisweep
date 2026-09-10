@@ -52,6 +52,8 @@ from .events import (ApproachStarted, ApproachFinished, AxisStepped,
 from .labprofile import LabProfile
 from .limits import validate_program
 from .journal import Journal
+from .vector import as_vector, fit_to_length, resolve_axis, vector_text
+from .vectormaps import VectorMapWriter
 from .maps import MapWriter
 from .provenance import RunProvenance
 from .runner import AxisRunner
@@ -151,6 +153,13 @@ class SweepEngine(threading.Thread):
         self._read_errors: set[str] = set()
         self._nan_warned: set[str] = set()
         self._last_reads: list = []
+        # reads that turn out to be a whole trace rather than a number.
+        # Nothing is declared up front: the first reading settles it, and
+        # from then on that read has a length, an x axis and maps of its
+        # own. See unisweep/core/vector.py.
+        self._vector_specs: dict = {}
+        self._vector_maps: dict = {}
+        self._vector_warned: set = set()
         self._last_row: tuple = ()
 
         self.provenance: Optional[RunProvenance] = None
@@ -361,17 +370,96 @@ class SweepEngine(threading.Thread):
                 self._nan_warned.add(read)
                 self._error(f"read {read}", ValueError(
                     "device returned NaN — recording NaN and continuing"))
-            row.append(v)
-            self._last_reads.append(v)
+            trace = self._as_trace(read, v)
+            if trace is None:
+                row.append(v)
+                self._last_reads.append(v)
+            else:
+                # the cell keeps the comma-joined form every script
+                # already pointed at these files expects; the numbers
+                # themselves go to the map tables at full precision
+                row.append(vector_text(trace))
+                self._last_reads.append(trace)
         return tuple(row)
+
+    # ---------------- trace-valued reads --------------------------------
+    def _read_spec(self, read: str):
+        addr, _, option = read.rpartition(".")
+        try:
+            return self.profile.spec(addr, option)
+        except Exception:                         # noqa: BLE001
+            return None
+
+    def _as_trace(self, read: str, value):
+        """The reading as a trace, or None if it is one number.
+
+        The first trace of a run fixes that read's length and x axis for
+        the whole run: a map whose rows changed width halfway through
+        would not be a map. Later readings are fitted to it and the
+        change is reported once, because someone retuning the span
+        overnight must cost a warning, not the data.
+        """
+        spec = self._read_spec(read)
+        mode = str(getattr(spec, "vector", "auto") or "auto")
+        try:
+            trace = as_vector(value, force=mode)
+        except Exception:                         # noqa: BLE001
+            return None
+        if trace is None:
+            return None
+        known = self._vector_specs.get(read)
+        if known is None:
+            addr = read.rpartition(".")[0]
+            known = resolve_axis(read, int(trace.size),
+                                 adapter=self._read_adapters.get(addr),
+                                 spec=spec)
+            self._vector_specs[read] = known
+            self._emit(SweepError(
+                where=f"read {read}", fatal=False,
+                message=("a trace, not a number — " + known.describe()
+                         + "; it gets maps of its own")))
+        elif trace.size != known.length and read not in self._vector_warned:
+            self._vector_warned.add(read)
+            self._error(f"read {read}", ValueError(
+                f"the trace changed length ({known.length} → "
+                f"{trace.size}); fitting to the length this run started "
+                f"with and continuing"))
+        return fit_to_length(trace, known.length)
+
+    def _vector_map(self, read: str):
+        """The map writer for one trace-valued read, built on demand."""
+        writer = self._vector_maps.get(read)
+        if writer is not None:
+            return writer
+        prog = self.live.get()
+        if not (prog.save_maps or prog.map_images):
+            return None
+        path = getattr(self._writer, "path", "") or ""
+        if not path:
+            return None
+        try:
+            writer = VectorMapWriter(
+                self.core_dir, self.live, self._loop_axes, read,
+                self._vector_specs[read], path,
+                images=prog.map_images, write_files=prog.save_maps,
+                style=prog.map_style,
+                renderer=getattr(self._map, "_renderer", None),
+                style_source=self.map_style_source)
+        except Exception as exc:                  # noqa: BLE001
+            self._error("maps", exc)
+            self._vector_maps[read] = None
+            return None
+        self._vector_maps[read] = writer
+        return writer
 
     def _record_point(self) -> None:
         row = self._measure_row()
         self._last_row = row
         self._writer.write(row)
+        self._record_traces()
         if self._map is not None:
             self._map.add_point(self.axis_values[self._loop_axes[-1]],
-                                self._last_reads,
+                                self._scalarised(),
                                 axis_values=tuple(self.axis_values))
         self._points_done += 1
         now = time.perf_counter()
@@ -391,6 +479,72 @@ class SweepEngine(threading.Thread):
                             eta_seconds=eta,
                             elapsed_seconds=now - self._zero_time))
         self._run_script()
+
+    def _axis_label(self, axis_index: int) -> str:
+        axis = self.live.get().axes[axis_index]
+        return f"{axis.device}.{axis.parameter}"
+
+    def _scalarised(self) -> list:
+        """The row as the scalar map writer can take it.
+
+        A trace has no place in a map whose axes are two sweep
+        parameters. In a 1-D or 2-D sweep it has maps of its own and is
+        left out of these entirely; in a 3-D sweep, where the promoted
+        map would need a fourth dimension to draw, the screen falls back
+        to the first element — which is what goes here.
+        """
+        out = []
+        for read, value in zip(self.reads, self._last_reads):
+            if read not in self._vector_specs:
+                out.append(value)
+                continue
+            trace = np.asarray(value, dtype=float).ravel()
+            out.append(float(trace[0]) if trace.size else np.nan)
+        return out
+
+    def _record_traces(self) -> None:
+        """Give every trace-valued read its row, and the GUI its map.
+
+        The live event is the same one the scalar maps emit, so a
+        promoted map needs nothing new anywhere downstream: the plot
+        window already knows how to draw a set of these and step through
+        it. A 3-D sweep is the exception — its promoted maps are one
+        dimension past anything the screen can show, so they are written
+        and not sent.
+        """
+        if not self._vector_specs:
+            return
+        inner = self.axis_values[self._loop_axes[-1]]
+        for read, value in zip(self.reads, self._last_reads):
+            if read not in self._vector_specs:
+                continue
+            if read in self._vector_maps and self._vector_maps[read] is None:
+                continue
+            if self._map is not None:
+                # its own writer owns the files; in a 3-D sweep the
+                # scalar map still supplies the first-element row the
+                # screen falls back to
+                self._map.ignore(read, keep_rows=self.dims >= 3)
+            writer = self._vector_map(read)
+            if writer is None:
+                continue
+            try:
+                drawn = writer.add_row(inner, value,
+                                       tuple(self.axis_values))
+            except Exception as exc:              # noqa: BLE001
+                self._error("maps", exc)
+                self._vector_maps[read] = None
+                continue
+            if drawn is None or self.dims >= 3:
+                continue
+            spec = self._vector_specs[read]
+            self._emit(MapRowCommitted(
+                grid=drawn["grid"], read_rows={read: drawn["row"]},
+                row_value=drawn["row_value"],
+                master_value=drawn["master_value"],
+                iteration=drawn["iteration"],
+                x_label=spec.axis_label,
+                y_label=self._axis_label(self._loop_axes[-1])))
 
     def _run_script(self) -> None:
         prog = self.live.get()
@@ -513,6 +667,14 @@ class SweepEngine(threading.Thread):
                 self.axis_values[axis_i] = pt.value   # advance w/o touching HW
                 if self._map is not None:
                     self._map.add_skipped(pt.value)
+                for read in self._vector_specs:
+                    writer = self._vector_maps.get(read)
+                    if writer is not None:
+                        try:
+                            writer.add_skipped(pt.value,
+                                               tuple(self.axis_values))
+                        except Exception:         # noqa: BLE001
+                            pass
                 self._emit(PointSkipped(axis_values=tuple(self.axis_values)))
                 continue
             if not approached:
@@ -1085,7 +1247,10 @@ class SweepEngine(threading.Thread):
                             result = self._map.commit_row(
                                 row_value=self.axis_values[loop_axes[k]],
                                 master_value=self.axis_values[loop_axes[0]])
-                            if result is not None:
+                            if result is not None and result[1]:
+                                # a row with nothing in it is a row every
+                                # read on the page has handed to another
+                                # writer — there is nothing to draw
                                 grid, rows = result
                                 self._emit(MapRowCommitted(
                                     grid=grid, read_rows=rows,
@@ -1174,6 +1339,16 @@ class SweepEngine(threading.Thread):
                     self._writer.close()
             except Exception:                     # noqa: BLE001
                 pass
+            for read, writer in list(self._vector_maps.items()):
+                if writer is None:
+                    continue
+                try:
+                    writer.finish()
+                    if writer.last_error:
+                        self._error("maps", RuntimeError(
+                            f"{read}: {writer.last_error}"))
+                except Exception:                 # noqa: BLE001
+                    pass
             if self._map is not None:
                 try:
                     self._map.finish()

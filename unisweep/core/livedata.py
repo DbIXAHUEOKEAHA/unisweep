@@ -191,7 +191,11 @@ class LiveMaps:
                     iterations.append({"grid": tuple(event.grid),
                                        "rows": [], "labels": [],
                                        "master": event.master_value,
-                                       "iteration": event.iteration})
+                                       "iteration": event.iteration,
+                                       "x_label": getattr(event, "x_label",
+                                                          ""),
+                                       "y_label": getattr(event, "y_label",
+                                                          "")})
                 it = iterations[-1]
                 row = np.asarray(row, dtype=float)
                 n = len(it["grid"])
@@ -206,6 +210,16 @@ class LiveMaps:
             its = self._maps.get(read, [])
             return [f"#{it['iteration']}  ax1={it['master']:g}"
                     for it in its]
+
+    def axis_labels(self, read: str) -> tuple:
+        """What this read's map is drawn against, when it is not the
+        sweep's own axes — a trace-valued read has an x axis of its own.
+        ('', '') means the sweep's, as before."""
+        with self._lock:
+            its = self._maps.get(read, [])
+            if not its:
+                return ("", "")
+            return (its[-1].get("x_label", ""), its[-1].get("y_label", ""))
 
     def matrix(self, read: str, iteration: int = -1):
         """(grid, row_labels, 2-D array) of one iteration, or None."""

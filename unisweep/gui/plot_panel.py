@@ -405,7 +405,7 @@ class PlotWindow(tk.Toplevel):
         if tuple(options) != tuple(self.quick_box.cget("values") or ()):
             self.quick_box.configure(values=options)
         self.quick_box.set(c.zcol if c.kind == "map" else c.ycol)
-        if c.kind == "map" and self.manager.dimensions >= 3:
+        if c.kind == "map" and self._is_a_set(c.zcol):
             self.plane_label.pack(side="left", padx=(0, 2))
             self.plane_box.pack(side="left")
             self._refresh_planes()
@@ -510,16 +510,34 @@ class PlotWindow(tk.Toplevel):
         if not c.auto_y and (c.ymin is not None or c.ymax is not None):
             self.ax.set_ylim(bottom=c.ymin, top=c.ymax)
 
+    def _is_a_set(self, read: str) -> bool:
+        """Whether this read has more than one map to step through.
+
+        A 3-D sweep always has. So does a 2-D sweep of a read that
+        returns a whole trace: the trace is its own inner axis, so each
+        master point is a map of its own — the same set, arrived at from
+        one dimension lower.
+        """
+        if self.manager.dimensions >= 3:
+            return True
+        try:
+            return len(self.manager.maps.iteration_labels(read)) > 1
+        except Exception:                          # noqa: BLE001
+            return False
+
     def _draw_map(self):
         """Legacy-mapper rendering: committed rows on the frozen walk grid,
         index-space axes with value-labelled ticks (add_ticks style)."""
         c = self.config
-        if self.manager.dimensions >= 3:
+        if self._is_a_set(c.zcol):
             self._refresh_planes()
         plane = -1 if c.plane == "latest" else int(c.plane)
         result = self.manager.maps.matrix(c.zcol, plane)
-        self.ax.set_xlabel(self.manager.inner_label)
-        self.ax.set_ylabel(self.manager.row_label)
+        # a trace-valued read is drawn against the trace's own axis, and
+        # says so; everything else keeps the sweep's labels
+        own_x, own_y = self.manager.maps.axis_labels(c.zcol)
+        self.ax.set_xlabel(own_x or self.manager.inner_label)
+        self.ax.set_ylabel(own_y or self.manager.row_label)
         if c.title:
             self.ax.set_title(c.title, fontsize=10)
         if result is None:
