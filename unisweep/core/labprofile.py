@@ -166,6 +166,15 @@ class Problem:
         return f"[{self.level}] {self.where}: {self.message}"
 
 
+def _vector_mode(value: Any) -> str:
+    """``true``/``false`` are the natural things to write in JSON, and
+    "auto" is what the absence of the key means."""
+    if isinstance(value, bool):
+        return "always" if value else "never"
+    text = str(value or "auto").strip().lower()
+    return text if text in ("auto", "always", "never") else "auto"
+
+
 @dataclass(frozen=True)
 class ParameterSpec:
     """Meaning and safe envelope of one driver parameter."""
@@ -182,6 +191,16 @@ class ParameterSpec:
     settable: bool = True
     readable: bool = True
     notes: str = ""
+    #: whether a reading of this parameter is a whole trace. "auto"
+    #: decides by the shape of the value, which is right almost always;
+    #: "always"/"never" settle a device that is ambiguous about it.
+    vector: str = "auto"
+    #: the trace's own x axis: a list of values, or the name of the
+    #: driver getter that reports them. Absent, the driver's
+    #: ``<option>_axis`` is tried and then the plain index.
+    vector_axis: Any = None
+    axis_name: str = ""               # 'frequency', 'delay'
+    axis_unit: str = ""               # 'Hz', 's'
 
     # ---- helpers -----------------------------------------------------
     @property
@@ -248,6 +267,11 @@ class ParameterSpec:
             settable=bool(data.get("settable", True)),
             readable=bool(data.get("readable", True)),
             notes=str(data.get("notes", "") or ""),
+            vector=_vector_mode(data.get("vector", "auto")),
+            vector_axis=data.get("vector_axis",
+                                 data.get("axis", None)),
+            axis_name=str(data.get("axis_name", "") or ""),
+            axis_unit=str(data.get("axis_unit", "") or ""),
         )
 
 

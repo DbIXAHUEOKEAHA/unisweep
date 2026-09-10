@@ -74,6 +74,12 @@ class MapRowCommitted:
     row_value: float              # outer (row) axis value
     master_value: float           # 3-D master value (0.0 for 2-D)
     iteration: int                # 3-D iteration index (0 for 2-D)
+    #: what the axes of THIS map are, when they are not the sweep's own.
+    #: A read that returns a whole trace is drawn against the trace's
+    #: axis, not the inner sweep axis, and the window cannot know that
+    #: from the columns alone. Empty means "the sweep's axes, as before".
+    x_label: str = ""
+    y_label: str = ""
 
 
 @dataclass(frozen=True)

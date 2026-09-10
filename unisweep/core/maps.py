@@ -398,6 +398,17 @@ class MapWriter:
         # source of truth; without one (headless, tests) the renderer
         # keeps its defaults.
         self.style_source = style_source
+        #: reads this writer must not put in its own files. A read that
+        #: turns out to return a whole trace has maps of its own, whose
+        #: inner axis is the trace — see vectormaps.VectorMapWriter — and
+        #: two writers producing the same file name would fight.
+        self._ignored: set = set()
+        #: …and of those, the ones whose ROWS are still wanted. In a 3-D
+        #: sweep a promoted map is one dimension past anything the screen
+        #: can draw, so the display falls back to the first element of
+        #: each trace: that row comes from here, while the files come
+        #: from the promoted writer.
+        self._rows_only: set = set()
 
         base = os.path.basename(data_path)
         stem = os.path.splitext(base)[0]
@@ -439,6 +450,22 @@ class MapWriter:
     def last_render_error(self) -> str:
         return getattr(self._renderer, "last_error", "") \
             if self._renderer is not None else ""
+
+    def ignore(self, read: str, keep_rows: bool = False) -> None:
+        """Hand this read's FILES over to another writer.
+
+        ``keep_rows`` leaves the row going to the GUI, which is how a 3-D
+        sweep still draws something for a trace-valued read while its
+        real data is written one dimension deeper. Idempotent, and only
+        honoured before the files exist — a read cannot change kind
+        halfway through a sweep.
+        """
+        if read in self.reads and not self._files_created:
+            self._ignored.add(read)
+            if keep_rows:
+                self._rows_only.add(read)
+            else:
+                self._rows_only.discard(read)
 
     def _style_for(self, read: str) -> dict:
         """The colour scale and transform this read is being shown with.
@@ -503,6 +530,8 @@ class MapWriter:
             header = ",".join([_axis_name(prog.axes[i])
                                for i in self.loop_axes])
             for read in self.reads:
+                if read in self._ignored:
+                    continue
                 fh = open(self._xyz_path(read), "a", encoding="utf-8")
                 if fh.tell() == 0:
                     fh.write(header + f",{read}")
@@ -510,6 +539,8 @@ class MapWriter:
         coords = ",".join(f"{float(axis_values[i]):g}"
                           for i in self.loop_axes)
         for read, v in zip(self.reads, read_values):
+            if read in self._ignored:
+                continue
             fh = self._xyz_handles[read]
             fh.write(f"\n{coords},"
                      + (f"{v:g}" if np.isfinite(v) else "nan"))
@@ -539,6 +570,8 @@ class MapWriter:
                     f"{_axis_name(prog.axes[self.inner])}")
         header = ",".join([head] + [f"{v:g}" for v in self._grid])
         for read in self.reads:
+            if read in self._ignored:
+                continue
             with open(self._table(read), "w", encoding="utf-8") as fh:
                 fh.write(header)
         self._files_created = True
@@ -616,6 +649,10 @@ class MapWriter:
         rows_out: dict[str, tuple] = {}
         for read in self.reads:
             row = self._row_onto_grid(self._read_vals[read])
+            if read in self._ignored:
+                if read in self._rows_only:
+                    rows_out[read] = tuple(float(v) for v in row)
+                continue
             rows_out[read] = tuple(float(v) for v in row)
             if np.isfinite(row).any():
                 lo = float(np.nanmin(row))

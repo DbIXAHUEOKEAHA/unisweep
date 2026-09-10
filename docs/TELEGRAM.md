@@ -154,6 +154,17 @@ nobody has used a code yet.
 **"another setup is already called X"** — the name is taken. Change it in
 **This setup is called** and it re-registers on its own.
 
+**"no bot service is running at …"** — the address this copy of Unisweep
+was built with does not point at a running service. Either the build is
+older than the current deployment, or the service is gone. Point one
+machine somewhere else with `UNISWEEP_BOT_URL`; fix it for everybody by
+correcting `DEFAULT_SERVICE_URL` in `unisweep/core/telegram_link.py`. Note
+that a machine already paired keeps the address in its own `config/`, so it
+will carry on working while a fresh install cannot pair at all.
+
+**"… is not answering"** — the service is asleep, still booting, or its
+public domain points at a port the service is not listening on.
+
 **"problem: …"** — the service could not be reached. Unisweep keeps retrying
 with a growing delay and nothing is lost: notifications stay queued until
 they get through, and each carries a sequence number so a retry after a

@@ -49,18 +49,45 @@ from unisweep.core.devices import DriverAdapter, VirtualTime  # noqa: E402
 import unisweep.gui.app as appmod                           # noqa: E402
 
 
+class TraceDevice:
+    """A read that hands back a whole line, the way a VNA does."""
+
+    def __init__(self, address="VNA"):
+        self.set_options = ["Power"]
+        self.get_options = ["Trace"]
+        self._power = 0.0
+
+    def set_Power(self, value=None, speed=None):
+        self._power = float(value)
+
+    def Power(self):
+        return self._power
+
+    def Trace_axis(self):
+        return [1e9 + 1e8 * i for i in range(8)]
+
+    def Trace(self):
+        return [self._power + 0.1 * i for i in range(8)]
+
+
 class FakeRegistry:
     def __init__(self, core_dir=None):
         self.resources_dir = os.path.join(core_dir or "/tmp", "resources")
-        self.addresses = ["Time", "SMU", "LOCKIN", "BARE"]
-        self.types = {"Time": "Time", "SMU": "Mock", "LOCKIN": "Mock"}
+        self.addresses = ["Time", "SMU", "LOCKIN", "BARE", "VNA"]
+        self.types = {"Time": "Time", "SMU": "Mock", "LOCKIN": "Mock",
+                      "VNA": "Trace"}
         self.driver_classes = {"Mock": MockDevice}
         self.import_errors = {}
         self._adapters = {}
 
     def connect(self, a):
         if a not in self._adapters:
-            inst = VirtualTime() if a == "Time" else MockDevice(a)
+            if a == "Time":
+                inst = VirtualTime()
+            elif a == "VNA":
+                inst = TraceDevice(a)
+            else:
+                inst = MockDevice(a)
             self._adapters[a] = DriverAdapter(a, inst)
         return self._adapters[a]
 
@@ -68,10 +95,14 @@ class FakeRegistry:
     def disconnect_all(self): pass
 
     def set_options(self, a):
-        return ["Time"] if a == "Time" else ["Volt", "Curr"]
+        if a == "Time":
+            return ["Time"]
+        return ["Power"] if a == "VNA" else ["Volt", "Curr"]
 
     def get_options(self, a):
-        return ["Elapsed", "Random"] if a == "Time" else ["Volt", "Curr"]
+        if a == "Time":
+            return ["Elapsed", "Random"]
+        return ["Trace"] if a == "VNA" else ["Volt", "Curr"]
 
     def read_catalogue(self):
         return [f"{a}.{o}" for a in self.addresses
@@ -730,12 +761,112 @@ def map_colormap_check():
     print(f"MAP COLORMAP OK — {os.path.basename(png)} recoloured on Apply")
 
 
+
+def vector_map_check():
+    """A read that returns a whole trace, in the running application.
+
+    The promotion rule is that the trace becomes the innermost axis and
+    every sweep axis shifts out by one. A 2-D sweep of traces is
+    therefore the set of maps a 3-D sweep of numbers produces — and the
+    plot window has to offer the same toggle to step through it, drawn
+    against the trace's own axis rather than the sweep's.
+    """
+    import gc
+    gc.collect()
+
+    appmod.DeviceRegistry = FakeRegistry
+    app = appmod.App(scratch("uni_vector"))
+    tk_errors = []
+    app.root.report_callback_exception = \
+        lambda et, ev_, tb: tk_errors.append((et.__name__, str(ev_)))
+
+    def pump(seconds=0.2):
+        t0 = time.time()
+        while time.time() - t0 < seconds:
+            app.root.update()
+            time.sleep(0.01)
+
+    pump(0.4)
+    if app._wizard is not None:
+        app._wizard._skip()
+    pump(0.2)
+
+    read = "VNA.Trace"
+    from unisweep.agent.session import AgentSession
+    from unisweep.gui.plot_panel import PlotSettingsDialog
+    session = AgentSession(app)
+    window = app.plots.spawn("map")
+    pump(0.3)
+
+    started = session.run_sweep({
+        "axes": [{"device": "SMU", "parameter": "Volt", "start": 0.0,
+                  "stop": 0.2, "rate": 0.1, "delay": 0.005,
+                  "count_mode": "step", "walks": 1, "snake": False},
+                 {"device": "VNA", "parameter": "Power", "start": 0.0,
+                  "stop": 0.2, "rate": 0.1, "delay": 0.005,
+                  "count_mode": "step", "walks": 1, "snake": False}],
+        "reads": [read]}, answers=["no"])
+    assert started["started"], started
+    for _ in range(600):
+        pump(0.05)
+        if app.event_tap.state == "finished":
+            break
+    assert app.event_tap.state == "finished", session.status()
+    pump(0.6)
+
+    # the trace was recognised without anything being declared
+    engine = app.engine
+    spec = engine._vector_specs.get(read)
+    assert spec is not None, "the trace was read as a number"
+    assert spec.length == 8, spec
+    assert spec.source == "driver", f"the driver's own axis: {spec.source}"
+
+    # one map per master point, in the 3-D layout, one dimension lower
+    day = getattr(app, "_last_day_dir", "")
+    made = sorted(os.path.join(r, n)
+                  for r, _d, ns in os.walk(os.path.join(day, "2d_maps"))
+                  for n in ns if n.endswith(".csv"))
+    assert len(made) == 3, f"one map per master point: {made}"
+    for path in made:
+        assert os.path.basename(os.path.dirname(path)).startswith(
+            "SMU.Volt_"), path
+
+    # …and the window draws it, against the trace's axis, with the toggle
+    window.config.zcol = read
+    window.mark_dirty()
+    window.redraw_if_dirty()
+    pump(0.3)
+    labels = app.live_maps.iteration_labels(read)
+    assert len(labels) == 3, labels
+    assert window._is_a_set(read), "no toggle for a set of maps"
+    assert window.ax.get_xlabel().startswith("axis"), \
+        f"x is the trace's own axis, not the sweep's: "         f"{window.ax.get_xlabel()!r}"
+    assert window.ax.get_ylabel() == "VNA.Power", window.ax.get_ylabel()
+    matrix = app.live_maps.matrix(read, -1)
+    assert matrix is not None and matrix[2].shape == (3, 8), \
+        None if matrix is None else matrix[2].shape
+
+    window.open_settings()
+    pump(0.2)
+    for dlg in window.winfo_children():
+        if isinstance(dlg, PlotSettingsDialog):
+            assert read in dlg.b_z.cget("values"), "the read is not offered"
+            dlg._ok()
+    pump(0.2)
+
+    app._on_close()
+    assert not tk_errors, tk_errors
+    print(f"VECTOR MAP OK — {len(made)} maps of {spec.length}-point traces, "
+          f"toggle offered")
+
+
 if __name__ == "__main__":
     import shutil
     for _name in ("uni_coldstart", "uni_lifecycle", "uni_controls",
-                  "uni_cmap"):
+                  "uni_cmap", "uni_vector"):
         shutil.rmtree(scratch(_name), ignore_errors=True)
     main()
     lifecycle_check()
     control_surface_check()
     map_colormap_check()
+    vector_map_check()

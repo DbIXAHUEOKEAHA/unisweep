@@ -108,6 +108,13 @@ def test_the_service_address_is_compiled_in():
     assert DEFAULT_SERVICE_URL.startswith("https://"), DEFAULT_SERVICE_URL
     assert service_url("") == DEFAULT_SERVICE_URL
     assert service_url("https://mine.example/") == "https://mine.example"
+    # Pinned to the deployed address on purpose. A placeholder shipped
+    # here once and went unnoticed: every machine that had ever been
+    # paired carried the real address in its gitignored
+    # config/settings.json, which masked the default, so only a *fresh*
+    # install ever dialled it — and got "Application not found".
+    # Changing this line should be a deliberate, reviewed act.
+    assert DEFAULT_SERVICE_URL == "https://unisweep-production.up.railway.app"
     import os
     os.environ["UNISWEEP_BOT_URL"] = "https://env.example"
     try:
@@ -116,6 +123,45 @@ def test_the_service_address_is_compiled_in():
         assert service_url("https://mine.example") == "https://env.example"
     finally:
         del os.environ["UNISWEEP_BOT_URL"]
+
+
+def test_an_address_with_nothing_behind_it_says_so():
+    """What a physicist saw was the hosting platform's raw JSON:
+
+        Could not get a pairing code: HTTP 404: {"status": "error",
+        "code": 404, "message": "Application not found", ...}
+
+    The service defines every /api/ path, so it can never answer 404 on
+    one — something else did, and the useful thing to say is which
+    address nothing is running at.
+    """
+    link = _link()
+
+    class _Err(urllib.error.HTTPError):
+        def __init__(self, code, body):
+            super().__init__("https://x.example", code, "", {}, None)
+            self._body = body.encode()
+
+        def read(self):
+            return self._body
+
+    edge_404 = _Err(404, '{"status":"error","code":404,'
+                         '"message":"Application not found"}')
+    message = link._http_error(edge_404, "/api/v1/pair")
+    assert "no bot service is running at" in message, message
+    assert link.service_url in message, message
+    assert "Application not found" in message, message
+    assert "{" not in message, "the raw body leaked through"
+
+    # the port-mismatch case, which looked healthy in the server's own logs
+    asleep = _Err(502, "Bad gateway")
+    assert "not answering" in link._http_error(asleep, "/api/v1/hello")
+
+    # a refusal from our own service still reads as it always did
+    ours = _Err(409, '{"error":"name_taken"}')
+    assert link._http_error(ours, "/api/v1/hello") == "HTTP 409: name_taken"
+    # and a 404 that is not one of our API paths is not reinterpreted
+    assert link._http_error(edge_404, "/favicon.ico").startswith("HTTP 404")
 
 
 def test_a_taken_setup_name_is_reported_not_retried():
@@ -502,22 +548,6 @@ def test_1d_sweep_has_a_trace_but_no_map():
     assert snap["maps"] == {}
 
 
-if __name__ == "__main__":
-    passed = failed = 0
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            try:
-                fn()
-                print(f"PASS {name}")
-                passed += 1
-            except Exception:
-                import traceback
-                print(f"FAIL {name}")
-                traceback.print_exc()
-                failed += 1
-    print(f"\n{passed} passed, {failed} failed")
-    sys.exit(1 if failed else 0)
-
 
 def test_a_fresh_install_has_an_identity_before_it_reports():
     """The application starts reporting inside ``App.__init__``, before
@@ -562,3 +592,20 @@ def test_a_link_without_an_identity_says_exactly_what_is_missing():
     assert link.start() is False
     assert "identity" in link.last_error
     assert link.summary().startswith("problem:")
+
+
+if __name__ == "__main__":
+    passed = failed = 0
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            try:
+                fn()
+                print(f"PASS {name}")
+                passed += 1
+            except Exception:
+                import traceback
+                print(f"FAIL {name}")
+                traceback.print_exc()
+                failed += 1
+    print(f"\n{passed} passed, {failed} failed")
+    sys.exit(1 if failed else 0)

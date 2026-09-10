@@ -653,18 +653,36 @@ class Vna(GenericInstrument):
         scpi = f'BAND {value}'
         self.write(scpi)
         
-    def freqs(self):
+    def frequency_axis(self):
+        """The sweep's frequency points, as numbers.
+
+        This is what Unisweep asks for when it draws a trace: the array
+        goes straight onto the map's x axis, with no text in between.
+        """
         start = self.start_freq()
         stop = self.stop_freq()
         num = self.num_points()
-        
-        f = np.linspace(float(start), float(stop), int(num))
-        f = np.array2string(f, separator = ',')[1:-1]
-        f = f.replace('\r', '')
-        f = f.replace('\n', '')
-        f = f.replace(' ', '')
-        
-        return f
+        return np.linspace(float(start), float(stop), int(num))
+
+    #: Unisweep pairs a trace-valued read with '<name>_axis' and asks for
+    #: it once per run, so these are what put real frequencies under
+    #: trace_real / trace_im instead of a 0..N-1 index.
+    def trace_real_axis(self):
+        return self.frequency_axis()
+
+    def trace_im_axis(self):
+        return self.frequency_axis()
+
+    def freqs(self):
+        """The frequency points as a comma-separated string.
+
+        Built by hand rather than with np.array2string, which ABBREVIATES
+        anything longer than 1000 elements: a 1601-point sweep came back
+        as '1.000000e+09,1.000625e+09,...,2.000000e+09' — a frequency
+        list with a hole in the middle, and nothing said so. Use
+        frequency_axis() for the numbers themselves.
+        """
+        return ','.join(f'{v:.10g}' for v in self.frequency_axis())
         
     '''
     def reverse_sweep(self, start, stop, num_points):
