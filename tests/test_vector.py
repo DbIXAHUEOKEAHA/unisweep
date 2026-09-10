@@ -187,3 +187,61 @@ def test_an_axis_getter_that_raises_costs_the_axis_not_the_run():
     spec = resolve_axis("VNA.Trace", 3, adapter=Adapter(Hostile()))
     assert spec.source == "index"
     assert np.allclose(spec.axis, [0, 1, 2])
+
+
+# ---------------------------------------------------------------------------
+# the shapes a real instrument sends
+# ---------------------------------------------------------------------------
+def test_the_rohde_schwarz_trace_parses_as_it_arrives():
+    """``CALC1:DATA? FDAT`` with the whitespace stripped, which is exactly
+    what devices/Vna.py returns today. No driver change required."""
+    answer = "1.0000E-01,2.0000E-01,-3.5000E-02,4.1E-01"
+    assert np.allclose(as_vector(answer), [0.1, 0.2, -0.035, 0.41])
+
+
+def test_a_numpy_abbreviated_list_is_refused_rather_than_half_read():
+    """``np.array2string`` abbreviates anything longer than 1000 points:
+
+        1.000000e+09,1.000625e+09,...,2.000000e+09
+
+    A frequency list with a hole in it. Reading the visible half would be
+    worse than not reading it — a trace drawn against three-quarters of
+    an axis looks fine and is wrong — so this stays a non-trace and the
+    map falls back to the honest 0…N-1 index.
+    """
+    abbreviated = ",".join(["1.0e+09", "1.000625e+09", "...", "2.0e+09"])
+    assert as_vector(abbreviated) is None
+
+
+def test_a_long_axis_built_by_hand_survives_the_round_trip():
+    axis = np.linspace(1e9, 2e9, 1601)
+    text = ",".join(f"{v:.10g}" for v in axis)
+    assert np.allclose(as_vector(text), axis)
+
+
+def test_the_shipped_vna_driver_still_offers_what_unisweep_asks_for():
+    """A source check, because importing the driver needs the vendor
+    package. Two things must hold: the frequency list is not built with
+    the abbreviating call, and the trace reads have the companion axis
+    getters that put real frequencies under a map.
+    """
+    import ast as _ast
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(here, "devices", "Vna.py")
+    if not os.path.exists(path):
+        pytest.skip("the driver library is not in this checkout")
+    tree = _ast.parse(open(path, encoding="utf-8").read())
+    vna = next((n for n in _ast.walk(tree)
+                if isinstance(n, _ast.ClassDef) and n.name == "Vna"), None)
+    assert vna is not None, "the Vna class moved"
+    methods = {n.name: n for n in vna.body
+               if isinstance(n, _ast.FunctionDef)}
+    for name in ("trace_real_axis", "trace_im_axis", "frequency_axis"):
+        assert name in methods, f"{name} is how the map gets its x axis"
+    for name in ("freqs", "frequency_axis"):
+        calls = [n for n in _ast.walk(methods[name])
+                 if isinstance(n, _ast.Call)
+                 and getattr(n.func, "attr", "") == "array2string"]
+        assert not calls, (f"{name} builds the frequency list with "
+                           f"array2string, which abbreviates past 1000 "
+                           f"points")
