@@ -65,6 +65,32 @@ class AppSettings:
     tg_snapshot_s: float = 60.0
 
     # -----------------------------------------------------------------
+    def ensure_rig_identity(self, core_dir: str,
+                            default_name: str = "") -> bool:
+        """Give this installation its name-tag if it has none yet.
+
+        The application starts reporting the moment it launches, so the
+        identity has to exist before that — not when somebody first
+        presses "Generate code". Without this, a fresh install reports
+        *problem: service address or rig identity missing* on the
+        notifications page forever: a fault message for a setup where
+        nothing is wrong, only unpaired.
+
+        A random id and token, no network, nothing delivered to anybody
+        until a person pairs with a code. Returns True if it wrote.
+        """
+        from .telegram_link import new_rig_identity
+        changed = False
+        if not self.tg_rig_id or not self.tg_rig_token:
+            self.tg_rig_id, self.tg_rig_token = new_rig_identity()
+            changed = True
+        if not self.tg_rig_name and default_name:
+            self.tg_rig_name = default_name[:64]
+            changed = True
+        if changed:
+            self.save(core_dir)
+        return changed
+
     @classmethod
     def load(cls, core_dir: str) -> "AppSettings":
         path = os.path.join(core_dir, "config", "settings.json")

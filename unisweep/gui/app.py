@@ -27,7 +27,7 @@ from ..core.labprofile import LabProfile
 from ..core.limits import LimitPolicy
 from ..core.livedata import LiveData, LiveMaps
 from ..core.settings import AppSettings
-from ..core.telegram_link import TelegramLink, new_rig_identity, service_url
+from ..core.telegram_link import TelegramLink, service_url
 from .devices_page import DevicesPage
 from .plot_panel import PlotManager
 from .setget_page import SetGetPage
@@ -557,8 +557,16 @@ class App:
     # ---------------- telegram monitoring -------------------------------
     def _configure_telegram(self):
         """Hand the link the current settings.  Safe at any time — the
-        link picks the new configuration up on its next cycle."""
+        link picks the new configuration up on its next cycle.
+
+        This is also where a fresh install gets its identity: __init__
+        starts reporting before anyone has pressed anything, and a link
+        started without an id fails with "service address or rig identity
+        missing" — which the notifications page then shows as a problem
+        on a setup where nothing is wrong.
+        """
         st = self.settings
+        st.ensure_rig_identity(self.core_dir, self._default_rig_name())
         self.tg_link.configure(
             service_url=service_url(st.tg_service_url),
             rig_id=st.tg_rig_id, rig_token=st.tg_rig_token,
@@ -592,17 +600,7 @@ class App:
         setup again after a redeploy of the bot or a restart of the
         database.
         """
-        st = self.settings
-        changed = False
-        if not st.tg_rig_id or not st.tg_rig_token:
-            st.tg_rig_id, st.tg_rig_token = new_rig_identity()
-            changed = True
-        if not st.tg_rig_name:
-            st.tg_rig_name = self._default_rig_name()
-            changed = True
-        if changed:
-            st.save(self.core_dir)
-        self._configure_telegram()
+        self._configure_telegram()          # mints the identity if needed
         return self.tg_link.start()
 
     def telegram_running(self) -> bool:
@@ -626,11 +624,7 @@ class App:
         waiting for six digits, and an answer that arrives later through
         the event queue would be worse than a two-second wait.
         """
-        st = self.settings
-        if not st.tg_rig_id or not st.tg_rig_token:
-            st.tg_rig_id, st.tg_rig_token = new_rig_identity()
-            st.save(self.core_dir)
-        self._configure_telegram()
+        self._configure_telegram()          # mints the identity if needed
         return self.tg_link.request_code()
 
     def telegram_remove_user(self, chat_id) -> bool:
