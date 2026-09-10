@@ -258,6 +258,31 @@ class DriverInstaller:
 
     def _work(self, driver_names: list[str],
               assignments: dict[str, str]) -> None:
+        """Run the install and, whatever happens, say that it is over.
+
+        This thread is the only thing that will ever post
+        ``install_done``. If it dies on the way — a download that raises
+        past its own handler, a pip call that cannot run, a read-only
+        resources folder — the setup wizard's Close button stays disabled
+        and its modal grab never lets go of the window. On a brand-new
+        machine, which is exactly where an install is most likely to
+        blow up, that reads as "the application is frozen and I cannot
+        add my instrument".
+        """
+        try:
+            ok, summary = self._install(driver_names, assignments)
+        except BaseException as exc:              # noqa: BLE001
+            ok = False
+            summary = (f"Installation failed: "
+                       f"{type(exc).__name__}: {exc}")
+            self._log(summary)
+        try:
+            self.q.put_nowait(("install_done", ok, summary))
+        except queue.Full:
+            pass
+
+    def _install(self, driver_names: list[str],
+                 assignments: dict[str, str]) -> "tuple[bool, str]":
         ok = True
         failed: list[str] = []
         plan = self.plan(driver_names)
@@ -309,10 +334,7 @@ class DriverInstaller:
         summary = "Installation finished" if ok else \
             "Installation finished with errors: " + ", ".join(failed)
         self._log(summary)
-        try:
-            self.q.put_nowait(("install_done", ok, summary))
-        except queue.Full:
-            pass
+        return ok, summary
 
     # ---------------- dependency verification -------------------------
     def _driver_imports(self, name: str) -> set[str]:

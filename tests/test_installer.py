@@ -681,3 +681,54 @@ def test_concurrent_connect_yields_single_instance():
     assert Mock.init_log.count("SLOW::1") == 1, Mock.init_log
     assert other_dt < 0.2, \
         f"a slow open must not block other addresses: {other_dt:.2f}s"
+
+
+def test_a_crashing_install_still_says_it_is_over():
+    """The installer thread is the only thing that posts
+    ``install_done``. The setup wizard enables its Close button on that
+    message and holds a modal grab until then, so a thread that dies on
+    the way leaves a brand-new installation with a window nobody can use
+    and no way to reach the Devices page — which is where an instrument
+    would be added. Whatever happens in there, the message goes out.
+    """
+    import queue as _queue
+    from unisweep.core.installer import DriverInstaller
+
+    class Exploding(DriverInstaller):
+        def _install(self, driver_names, assignments):
+            raise RuntimeError("the network is not there")
+
+    q: "_queue.Queue" = _queue.Queue()
+    installer = Exploding.__new__(Exploding)
+    installer.q = q
+    installer._thread = None
+    installer._work(["SR830"], {})
+
+    messages = []
+    while not q.empty():
+        messages.append(q.get_nowait())
+    kinds = [m[0] for m in messages]
+    assert "install_done" in kinds, kinds
+    done = messages[kinds.index("install_done")]
+    assert done[1] is False
+    assert "the network is not there" in done[2]
+    assert any(m[0] == "install_log" and "network is not there" in m[1]
+               for m in messages), "the reason belongs in the log too"
+
+
+def test_a_normal_install_reports_through_the_same_door():
+    """The refactor that made the guard possible must not change what a
+    successful run says."""
+    import queue as _queue
+    from unisweep.core.installer import DriverInstaller
+
+    class Quiet(DriverInstaller):
+        def _install(self, driver_names, assignments):
+            return True, "Installation finished"
+
+    q: "_queue.Queue" = _queue.Queue()
+    installer = Quiet.__new__(Quiet)
+    installer.q = q
+    installer._thread = None
+    installer._work(["SR830"], {})
+    assert q.get_nowait() == ("install_done", True, "Installation finished")

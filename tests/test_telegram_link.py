@@ -517,3 +517,48 @@ if __name__ == "__main__":
                 failed += 1
     print(f"\n{passed} passed, {failed} failed")
     sys.exit(1 if failed else 0)
+
+
+def test_a_fresh_install_has_an_identity_before_it_reports():
+    """The application starts reporting inside ``App.__init__``, before
+    anybody has pressed anything. The identity used to be minted only
+    when someone pressed "Generate code", so on every fresh install the
+    notifications page read *problem: service address or rig identity
+    missing* — a fault message for a setup where nothing was wrong, only
+    unpaired. That is what a new user meets first, so it has to be true
+    from the first launch.
+    """
+    import tempfile
+    from unisweep.core.settings import AppSettings
+
+    core = tempfile.mkdtemp()
+    os.makedirs(os.path.join(core, "config"), exist_ok=True)
+    settings = AppSettings.load(core)                  # nothing on disk
+    assert not settings.tg_rig_id and not settings.tg_rig_token
+
+    assert settings.ensure_rig_identity(core, "bench-3") is True
+    assert len(settings.tg_rig_id) >= 16
+    assert len(settings.tg_rig_token) >= 16
+    assert settings.tg_rig_name == "bench-3"
+
+    # everything TelegramLink.start() refuses to run without
+    assert settings.tg_rig_id and settings.tg_rig_token
+    assert service_url(settings.tg_service_url)
+
+    # it is a name-tag, not a fresh one per launch
+    assert settings.ensure_rig_identity(core, "bench-3") is False
+    again = AppSettings.load(core)
+    assert again.tg_rig_id == settings.tg_rig_id
+    assert again.tg_rig_token == settings.tg_rig_token
+
+
+def test_a_link_without_an_identity_says_exactly_what_is_missing():
+    """The guard itself stays — it is right that a link with no identity
+    refuses to start. The bug was reaching it on a fresh install."""
+    link = TelegramLink(live_data=LiveData(), live_maps=LiveMaps(),
+                        program_getter=lambda: None)
+    link.configure(service_url=service_url(""), rig_id="", rig_token="",
+                   rig_name="x", allow_control=False)
+    assert link.start() is False
+    assert "identity" in link.last_error
+    assert link.summary().startswith("problem:")

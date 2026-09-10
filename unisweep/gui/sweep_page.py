@@ -432,9 +432,11 @@ class SweepPage(ttk.Frame):
             "Scripts are saved under <date>/scripts."
         )).pack(anchor="w", pady=(6, 0))
 
+        self._loaded_dims = 0            # see _set_dims
         self._set_dims()
         self.refresh_reads()
         self._autoload_preset()
+        self._loaded_dims = self.n_dims
 
     # ---------------- helpers -----------------------------------------
     @property
@@ -446,7 +448,14 @@ class SweepPage(ttk.Frame):
             card.grid_forget()
             if i < self.n_dims:
                 card.grid(row=i, column=0, sticky="ew", pady=4)
-        self._autoload_preset()
+        # Switching dimension loads that dimension's preset, and a preset
+        # REPLACES every field on the page. Re-picking the dimension that
+        # is already showing must not: the fields would silently revert
+        # to whatever was last saved, and the sweep typed in since would
+        # run the old numbers with nothing on screen to say so.
+        if self.n_dims != getattr(self, "_loaded_dims", 0):
+            self._loaded_dims = self.n_dims
+            self._autoload_preset()
 
     def refresh_reads(self):
         selected = {self.reads_list.get(i)
