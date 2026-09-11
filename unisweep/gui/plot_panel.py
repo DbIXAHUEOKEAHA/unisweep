@@ -102,6 +102,15 @@ class PlotConfig:
         return f"Line · {self.ycol.split('.')[-1] or '?'}"
 
 
+def _first_walk(grid, matrix):
+    """One forward pass out of a walked grid — see
+    :func:`unisweep.core.maps.first_walk_columns`, which the saved-image
+    renderer uses for the same slice, so the picture and the window agree.
+    """
+    from ..core.maps import first_walk_columns
+    return first_walk_columns(grid, matrix)
+
+
 def _apply_transform(expr_text: str, values: np.ndarray) -> np.ndarray:
     # One implementation, shared with the saved-image renderer: a
     # restyled PNG has to show the same numbers this window does.
@@ -149,12 +158,6 @@ class PlotSettingsDialog(tk.Toplevel):
                                            allow_empty=True, width=18)
             self.e_ylabel.grid(row=r, column=3, sticky="w"); r += 1
             self.v_scope = tk.BooleanVar(value=(c.scope == "scan"))
-            self.v_walk1 = tk.BooleanVar(value=c.first_walk_only)
-            ttk.Checkbutton(self, text="show only the first walk "
-                                       "(1/n of the fast-axis data)",
-                            variable=self.v_walk1,
-                            style="S.TCheckbutton").grid(
-                row=r, column=0, columnspan=4, sticky="w"); r += 1
             ttk.Checkbutton(self, text="show only the current scan "
                                        "(latest inner sweep)",
                             variable=self.v_scope,
@@ -208,6 +211,16 @@ class PlotSettingsDialog(tk.Toplevel):
                                        allow_empty=True, width=18)
             self.e_zt.grid(row=r, column=1, sticky="w"); r += 1
 
+        # Walks belong to the fast axis, and the fast axis is what a map's
+        # columns ARE: with 2 walks the grid is 0→1→0, so every row holds
+        # the return pass mirrored onto the same picture. That is the plot
+        # this option was asked for, so it is offered for both kinds.
+        self.v_walk1 = tk.BooleanVar(value=c.first_walk_only)
+        ttk.Checkbutton(self, text="show only the first walk "
+                                   "(1/n of the fast-axis data)",
+                        variable=self.v_walk1,
+                        style="S.TCheckbutton").grid(
+            row=r, column=0, columnspan=4, sticky="w"); r += 1
         ttk.Label(self, style="MutedS.TLabel",
                   text="Transforms are expressions in v, e.g. v*1e3, "
                        "log10(abs(v))").grid(
@@ -259,6 +272,7 @@ class PlotSettingsDialog(tk.Toplevel):
             return
         c = self.cfg
         c.title = self.e_title.value() or ""
+        c.first_walk_only = self.v_walk1.get()
         c.on_top = self.v_ontop.get()
         self.view.set_topmost(c.on_top)
         if c.kind == "line":
@@ -266,7 +280,6 @@ class PlotSettingsDialog(tk.Toplevel):
             c.xlabel = self.e_xlabel.value() or ""
             c.ylabel = self.e_ylabel.value() or ""
             c.logx, c.logy = self.v_logx.get(), self.v_logy.get()
-            c.first_walk_only = self.v_walk1.get()
             c.auto_x = self.v_auto_x.get()
             c.xmin, c.xmax = self.e_xmin.value(), self.e_xmax.value()
             c.auto_y = self.v_auto_y.get()
@@ -547,6 +560,8 @@ class PlotWindow(tk.Toplevel):
             self.ax.grid(False)
             return
         grid, row_labels, mat = result
+        if c.first_walk_only:
+            grid, mat = _first_walk(grid, mat)
         z = _apply_transform(c.ztransform, mat.copy())
         vmin = None if c.auto_z else c.zmin
         vmax = None if c.auto_z else c.zmax
@@ -612,12 +627,15 @@ class PlotManager:
             if chosen is None:
                 chosen = cfg
         if chosen is not None:
-            return {"cmap": chosen.cmap, "ztransform": chosen.ztransform}
+            return {"cmap": chosen.cmap, "ztransform": chosen.ztransform,
+                    "first_walk_only": chosen.first_walk_only}
         saved = self._templates.get("map") or {}
         default = PlotConfig(kind="map")
         return {"cmap": saved.get("cmap") or default.cmap,
                 "ztransform": saved.get("ztransform")
-                or default.ztransform}
+                or default.ztransform,
+                "first_walk_only": bool(saved.get(
+                    "first_walk_only", default.first_walk_only))}
 
     def map_cmap(self) -> str:
         """The colour scale maps are being drawn with right now.

@@ -132,6 +132,27 @@ def _monotonic_segments(arr: np.ndarray,
     return out
 
 
+def first_walk_columns(grid, matrix):
+    """The columns of one forward pass, out of a walk-concatenated grid.
+
+    A map's columns are the fast axis, and the fast axis is walked: with
+    two walks the grid runs 0→1→0 and every row carries the return pass
+    mirrored onto the same picture, which is what makes a hysteretic map
+    unreadable. The walks are exactly the monotonic runs of the grid, so
+    the first walk is the first run — no walk count needed, which is why
+    this also works on a saved table whose sweep was retuned mid-run.
+
+    A grid that only goes one way (one walk, or a trace's own axis) has a
+    single run and comes back untouched.
+    """
+    axis = np.asarray(grid, dtype=float)
+    segments = _monotonic_segments(axis, 0.0)
+    if len(segments) < 2:
+        return grid, matrix
+    first = segments[0]
+    return axis[first], np.asarray(matrix)[:, first]
+
+
 def _walk_grid(ax, uniform: bool = False) -> np.ndarray:
     """Forward grid concatenated over walks, alternating direction and
     dropping the duplicated turning point — exactly the legacy uniform grid
@@ -168,10 +189,11 @@ class _Renderer(threading.Thread):
         self.start()
 
     def submit_png(self, table_path: str, vmin, vmax, labels,
-                   cmap: str = "viridis", ztransform: str = "") -> None:
+                   cmap: str = "viridis", ztransform: str = "",
+                   first_walk_only: bool = False) -> None:
         with self._lock:
             self._pending[table_path] = (vmin, vmax, labels, cmap,
-                                         ztransform)
+                                         ztransform, first_walk_only)
         self._q.put(("png", table_path))
 
     def submit_gif(self, image_dir: str, param: str) -> None:
@@ -208,9 +230,11 @@ class _Renderer(threading.Thread):
         return os.path.sep.join(parts)
 
     def _render_png(self, table_path, vmin, vmax, labels,
-                    cmap: str = "viridis", ztransform: str = "") -> None:
+                    cmap: str = "viridis", ztransform: str = "",
+                    first_walk_only: bool = False) -> None:
         render_table_png(table_path, vmin, vmax, labels, cmap=cmap,
-                         ztransform=ztransform)
+                         ztransform=ztransform,
+                         first_walk_only=first_walk_only)
 
     def _render_gif(self, image_dir: str, param: str) -> None:
         try:
@@ -240,7 +264,8 @@ class _Renderer(threading.Thread):
 
 def render_table_png(table_path, vmin, vmax, labels,
                      title: str = "", cmap: str = "viridis",
-                     ztransform: str = "") -> Optional[str]:
+                     ztransform: str = "",
+                     first_walk_only: bool = False) -> Optional[str]:
     """Render (or RE-render) the PNG for one saved map table — the same
     output the sweep produces, so applying a plot window's settings to
     the saved images is a matter of calling this again with new style.
@@ -268,9 +293,15 @@ def render_table_png(table_path, vmin, vmax, labels,
     if rows is None or not len(rows):
         return None
     y = rows[:, 0]
+    values = rows[:, 1:]
+    if first_walk_only:
+        # the file keeps every walk — it is the archive. This is the
+        # picture of the window's settings, and the window is showing one
+        # pass out of n.
+        grid, values = first_walk_columns(grid, values)
     # transform first: auto limits have to be taken from the values that
     # are actually drawn, not from the raw table
-    z = apply_transform(ztransform, rows[:, 1:])
+    z = apply_transform(ztransform, values)
     image_path = _Renderer._image_path(table_path)
     os.makedirs(os.path.dirname(image_path), exist_ok=True)
     fig = Figure(figsize=(6, 4.5))
@@ -294,7 +325,8 @@ def render_table_png(table_path, vmin, vmax, labels,
 def restyle_saved_images(data_dir: str, param: str, vmin=None, vmax=None,
                          labels: Optional[dict] = None,
                          title: str = "", cmap: str = "viridis",
-                         ztransform: str = "") -> int:
+                         ztransform: str = "",
+                         first_walk_only: bool = False) -> int:
     """Apply a plot window's settings to every SAVED image of ``param``
     under ``data_dir`` (tables re-rendered to PNG; iteration GIFs
     rebuilt when present). Returns how many PNGs were re-rendered."""
@@ -309,7 +341,8 @@ def restyle_saved_images(data_dir: str, param: str, vmin=None, vmax=None,
             if tag in name and name.endswith(".csv"):
                 out = render_table_png(os.path.join(root, name),
                                        vmin, vmax, labels, title=title,
-                                       cmap=cmap, ztransform=ztransform)
+                                       cmap=cmap, ztransform=ztransform,
+                                       first_walk_only=first_walk_only)
                 if out:
                     n += 1
                     gif_dirs.add(os.path.dirname(os.path.dirname(out)))
@@ -682,7 +715,8 @@ class MapWriter:
                 self._renderer.submit_png(
                     path, vmin, vmax, self._labels(read),
                     cmap=style.get("cmap") or "viridis",
-                    ztransform=style.get("ztransform") or "")
+                    ztransform=style.get("ztransform") or "",
+                    first_walk_only=bool(style.get("first_walk_only")))
         self._inner_vals.clear()
         for read in self.reads:
             self._read_vals[read].clear()

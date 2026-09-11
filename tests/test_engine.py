@@ -2290,9 +2290,11 @@ def test_the_map_window_hands_its_whole_style_to_the_saved_images():
     seen: dict = {}
 
     def fake(data_dir, param, vmin=None, vmax=None, labels=None,
-             title="", cmap="viridis", ztransform=""):
+             title="", cmap="viridis", ztransform="",
+             first_walk_only=False):
         seen.update(param=param, vmin=vmin, vmax=vmax, title=title,
-                    cmap=cmap, ztransform=ztransform, labels=labels)
+                    cmap=cmap, ztransform=ztransform, labels=labels,
+                    first_walk_only=first_walk_only)
         return 1
 
     real = maps_mod.restyle_saved_images
@@ -2304,7 +2306,7 @@ def test_the_map_window_hands_its_whole_style_to_the_saved_images():
         config = types.SimpleNamespace(
             zcol="M2.Curr", auto_z=False, zmin=0.0, zmax=1.0,
             xlabel="Vg", ylabel="B", title="a map",
-            cmap="magma", ztransform="v ** 2")
+            cmap="magma", ztransform="v ** 2", first_walk_only=True)
         App._restyle_map_images(window, config)
         window.event_queue.get(timeout=20)          # the worker finished
     finally:
@@ -2315,6 +2317,8 @@ def test_the_map_window_hands_its_whole_style_to_the_saved_images():
     assert (seen["vmin"], seen["vmax"]) == (0.0, 1.0)
     assert seen["title"] == "a map"
     assert seen["labels"]["x"] == "Vg"
+    assert seen["first_walk_only"] is True, \
+        "the fast-axis option never left the window either"
 
 
 def test_the_renderer_can_still_make_gifs():
@@ -2426,10 +2430,12 @@ def test_the_sweeps_own_pngs_are_drawn_with_the_window_style():
     real = maps_mod.render_table_png
 
     def spy(table_path, vmin, vmax, labels, title="", cmap="viridis",
-            ztransform=""):
-        seen.append({"cmap": cmap, "ztransform": ztransform})
+            ztransform="", first_walk_only=False):
+        seen.append({"cmap": cmap, "ztransform": ztransform,
+                     "first_walk_only": first_walk_only})
         return real(table_path, vmin, vmax, labels, title=title, cmap=cmap,
-                    ztransform=ztransform)
+                    ztransform=ztransform,
+                    first_walk_only=first_walk_only)
 
     maps_mod.render_table_png = spy
     try:
@@ -2448,7 +2454,8 @@ def test_the_sweeps_own_pngs_are_drawn_with_the_window_style():
                                "M2": MockDevice("M2")}),
             tmp, queue.Queue(),
             map_style_source=lambda read: {"cmap": "magma",
-                                           "ztransform": "v * 2"})
+                                           "ztransform": "v * 2",
+                                           "first_walk_only": True})
         engine.start()
         engine.join(120)
         assert not engine.is_alive()
@@ -2459,6 +2466,7 @@ def test_the_sweeps_own_pngs_are_drawn_with_the_window_style():
     assert {e["cmap"] for e in seen} == {"magma"}, \
         f"the live render ignored the window's colormap: {seen}"
     assert {e["ztransform"] for e in seen} == {"v * 2"}
+    assert {e["first_walk_only"] for e in seen} == {True}
 
 
 def test_a_sweep_without_a_gui_keeps_the_default_style():
@@ -2524,3 +2532,98 @@ def test_the_renderer_shuts_down_cleanly():
     renderer = _Renderer()
     renderer.close()                  # must not raise
     assert not renderer.is_alive()
+
+
+def test_only_the_first_walk_is_kept_on_the_fast_axis():
+    """Feature 2, on the plot it was asked for.
+
+    A map's columns ARE the fast axis, and the fast axis is walked: with
+    two walks the grid runs 0→1→0 and every row carries the return pass
+    mirrored onto the same picture, which is what makes a hysteretic map
+    unreadable. The walks are exactly the monotonic runs of the grid, so
+    no walk count is needed — which is why this also works on a file
+    whose sweep was retuned mid-run.
+    """
+    import pytest
+    pytest.importorskip("tkinter")
+    if not (sys.platform.startswith("win") or os.environ.get("DISPLAY")):
+        pytest.skip("importing the GUI binds matplotlib's Tk backend")
+    from unisweep.gui.plot_panel import _first_walk
+
+    grid = np.array([0.0, 1.0, 2.0, 1.0, 0.0])       # two walks
+    matrix = np.array([[10.0, 11.0, 12.0, 21.0, 20.0],
+                       [30.0, 31.0, 32.0, 41.0, 40.0]])
+    kept_grid, kept = _first_walk(grid, matrix)
+    assert np.allclose(kept_grid, [0.0, 1.0, 2.0])
+    assert kept.shape == (2, 3)
+    assert np.allclose(kept[0], [10.0, 11.0, 12.0]), "the forward pass"
+
+    one = np.array([0.0, 1.0, 2.0])                  # one walk
+    same = np.array([[1.0, 2.0, 3.0]])
+    kept_grid, kept = _first_walk(one, same)
+    assert np.allclose(kept_grid, one) and np.allclose(kept, same)
+
+    three = np.array([0.0, 1.0, 0.0, 1.0])           # three walks
+    assert _first_walk(three, np.zeros((1, 4)))[1].shape == (1, 2)
+
+
+def test_the_walk_tag_on_a_measured_point_is_one_based():
+    """The line plot's version of the same option filters on this tag, so
+    a 0-based one would silently show nothing for a single-walk sweep."""
+    dev = MockDevice("M1")
+    prog = SweepProgram(
+        axes=(AxisProgram(device="M1", parameter="Volt", start=0.0,
+                          stop=0.2, rate=0.1, delay=0.002,
+                          count_mode=CountMode.STEP, walks=2),),
+        reads=("M1.Curr",))
+    evs, _live, _tmp = run_engine(prog, {"M1": dev})
+    points = [e for e in evs if isinstance(e, ev.PointMeasured)]
+    assert points
+    assert min(e.walk for e in points) == 1
+    assert sorted({e.walk for e in points}) == [1, 2]
+
+
+def test_the_line_plot_keeps_one_walk_out_of_n():
+    from unisweep.core.livedata import LiveData
+
+    data = LiveData()
+    data.reset(("time", "A.Volt_sweep", "A.Curr"), 1)
+    for i, (value, walk) in enumerate([(0, 1), (1, 1), (2, 1),
+                                       (2, 2), (1, 2), (0, 2)]):
+        data.add_row((float(i), float(value), float(value) * 10),
+                     (float(value),), walk=walk)
+    everything = data.xy("A.Volt_sweep", "A.Curr")[0]
+    first = data.xy("A.Volt_sweep", "A.Curr", walk=1)[0]
+    assert len(everything) == 6 and len(first) == 3
+    assert list(first) == [0.0, 1.0, 2.0]
+
+
+def test_the_saved_image_can_show_one_walk_out_of_n():
+    """The table keeps every walk — it is the archive. The picture is of
+    the window's settings, and a window showing one pass out of n must
+    not hand back an image of both."""
+    import tempfile
+    import matplotlib
+    matplotlib.use("Agg", force=False)
+    import matplotlib.image as mpimg
+    from unisweep.core.maps import render_table_png
+
+    data_dir = tempfile.mkdtemp()
+    tdir = os.path.join(data_dir, "2d_maps", "tables", "run_1")
+    os.makedirs(tdir)
+    table = os.path.join(tdir, "run_M2.Curr_map_1.csv")
+    with open(table, "w") as fh:                  # grid 0,1,2 then back
+        fh.write("T / V,0,1,2,1,0\n")
+        fh.write("1.0,10,11,12,21,20\n")
+        fh.write("2.0,30,31,32,41,40\n")
+    labels = {"param": "M2.Curr", "x": "V", "y": "T"}
+
+    both = mpimg.imread(render_table_png(table, None, None, labels)).copy()
+    one = mpimg.imread(render_table_png(table, None, None, labels,
+                                        first_walk_only=True)).copy()
+    assert not np.array_equal(both, one), \
+        "the option never reached the saved image"
+    again = mpimg.imread(render_table_png(table, None, None, labels,
+                                          first_walk_only=True)).copy()
+    assert np.array_equal(one, again), "the same style twice, same pixels"
+    assert open(table).read().count("21") == 1, "the table is untouched"
