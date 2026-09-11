@@ -406,7 +406,9 @@ class App:
                 n = restyle_saved_images(data_dir, config.zcol, vmin, vmax,
                                          labels, title=config.title,
                                          cmap=config.cmap,
-                                         ztransform=config.ztransform)
+                                         ztransform=config.ztransform,
+                                         first_walk_only=(
+                                             config.first_walk_only))
             except Exception as exc:               # noqa: BLE001
                 self.event_queue.put(
                     ("notify_result",

@@ -725,10 +725,11 @@ def map_colormap_check():
     real_render = maps_mod.render_table_png
 
     def spy(table_path, vmin, vmax, labels, title="", cmap="viridis",
-            ztransform=""):
+            ztransform="", first_walk_only=False):
         seen_cmaps.append(cmap)
         return real_render(table_path, vmin, vmax, labels, title=title,
-                           cmap=cmap, ztransform=ztransform)
+                           cmap=cmap, ztransform=ztransform,
+                           first_walk_only=first_walk_only)
 
     maps_mod.render_table_png = spy
     try:
@@ -860,13 +861,101 @@ def vector_map_check():
           f"toggle offered")
 
 
+
+def first_walk_check():
+    """Feature 2 end to end: n walks on the fast axis, 1/n on screen.
+
+    The option existed for line plots only, and a map is where it
+    matters: a map's columns ARE the fast axis, so with two walks every
+    row carries the return pass mirrored onto the same picture. This
+    drives it the way a person does — open the settings, tick the box,
+    look at what is drawn.
+    """
+    import gc
+    import numpy as np
+    gc.collect()
+
+    appmod.DeviceRegistry = FakeRegistry
+    app = appmod.App(scratch("uni_walks"))
+    tk_errors = []
+    app.root.report_callback_exception = \
+        lambda et, ev_, tb: tk_errors.append((et.__name__, str(ev_)))
+
+    def pump(seconds=0.2):
+        t0 = time.time()
+        while time.time() - t0 < seconds:
+            app.root.update()
+            time.sleep(0.01)
+
+    pump(0.4)
+    if app._wizard is not None:
+        app._wizard._skip()
+    pump(0.2)
+
+    from unisweep.core import events as smoke_ev
+    from unisweep.gui.plot_panel import PlotSettingsDialog
+    read = "SMU.Curr"
+    app.plots.set_columns(
+        ("time", "LOCKIN.Volt_sweep", "SMU.Volt_sweep", read), 2)
+    app.live_maps.reset((read,))
+    # two walks on the fast axis: the grid goes out and back
+    grid = (0.0, 1.0, 2.0, 1.0, 0.0)
+    for row in (0.0, 1.0):
+        app.event_queue.put(smoke_ev.MapRowCommitted(
+            grid=grid, read_rows={read: (10.0, 11.0, 12.0, 21.0, 20.0)},
+            row_value=row, master_value=0.0, iteration=0))
+    pump(0.5)
+
+    window = app.plots.spawn("map")
+    window.config.zcol = read
+    pump(0.2)
+    window.mark_dirty()
+    window.redraw_if_dirty()
+    pump(0.2)
+    before = np.asarray(window.ax.collections[0].get_array()).shape
+    assert before[-1] == 5, f"the walked grid is 5 columns wide: {before}"
+
+    window.open_settings()
+    pump(0.2)
+    ticked = False
+    for dlg in window.winfo_children():
+        if isinstance(dlg, PlotSettingsDialog):
+            boxes = [w for w in dlg.winfo_children()
+                     if w.winfo_class().endswith("Checkbutton")
+                     and "first walk" in str(w.cget("text"))]
+            assert boxes, ("a map's settings must OFFER the fast-axis "
+                           "option, not merely hold the variable")
+            assert boxes[0].winfo_ismapped(), "the checkbox is not on screen"
+            dlg.v_walk1.set(True)
+            dlg._ok()
+            ticked = True
+    assert ticked, "the map settings dialog never opened"
+    pump(0.2)
+    assert window.config.first_walk_only is True
+
+    window.mark_dirty()
+    window.redraw_if_dirty()
+    pump(0.3)
+    after = np.asarray(window.ax.collections[0].get_array())
+    assert after.shape[-1] == 3, \
+        f"only the forward pass should be drawn: {after.shape}"
+    assert np.allclose(np.asarray(after).ravel()[:3], [10.0, 11.0, 12.0]), \
+        "the columns kept are the return pass, not the forward one"
+
+    app._on_close()
+    assert not tk_errors, tk_errors
+    print(f"FIRST WALK OK — map narrowed {before[-1]} → "
+          f"{after.shape[-1]} columns")
+
+
 if __name__ == "__main__":
     import shutil
     for _name in ("uni_coldstart", "uni_lifecycle", "uni_controls",
-                  "uni_cmap", "uni_vector"):
+                  "uni_cmap", "uni_vector", "uni_walks"):
         shutil.rmtree(scratch(_name), ignore_errors=True)
     main()
     lifecycle_check()
     control_surface_check()
     map_colormap_check()
     vector_map_check()
+    first_walk_check()
