@@ -237,6 +237,10 @@ class SettingsPage(ttk.Frame):
                                          text="Copy client config",
                                          command=self._agent_copy)
         self.agent_copy_btn.grid(row=3, column=0, sticky="w", pady=(6, 2))
+        self.connector_btn = ttk.Button(
+            abody, text="Copy connector link (claude.ai)",
+            command=self._connector_copy)
+        self.connector_btn.grid(row=4, column=0, sticky="w", pady=(2, 2))
         self.agent_cmd = ttk.Label(abody, text="", style="MutedS.TLabel",
                                    justify="left", wraplength=560)
         self.agent_cmd.grid(row=3, column=1, columnspan=2, sticky="w",
@@ -338,6 +342,33 @@ class SettingsPage(ttk.Frame):
         else:
             self.app.stop_agent_endpoint()
         self._refresh_agent_status()
+
+    def _connector_copy(self):
+        """The URL and token for Settings → Connectors in claude.ai.
+
+        A different thing from the client config above: that one runs a
+        pipe on this computer and works in Claude Desktop only; this one
+        goes through the group's service and works everywhere, phone
+        included. Pressing it again issues a new token, which is how an
+        assistant is cut off.
+        """
+        try:
+            issued = self.app.tg_link.connector_token()
+        except Exception as exc:                       # noqa: BLE001
+            messagebox.showwarning(
+                "Connector",
+                f"Could not get a connector token:\n\n{exc}")
+            return
+        text = (f"URL:   {issued['url']}\n"
+                f"Token: {issued['token']}")
+        self._copy(text)
+        messagebox.showinfo(
+            "Connector",
+            "Copied. In claude.ai open Settings → Connectors → Add custom "
+            "connector, paste the URL, and put the token in as a bearer "
+            "header.\n\nIssuing this replaces any earlier token, so an "
+            "assistant configured with the old one stops working.\n\n"
+            + text)
 
     def _agent_copy(self):
         # the whole server entry, not the bare command: a client launches

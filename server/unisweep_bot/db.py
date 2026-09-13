@@ -192,6 +192,23 @@ CREATE TABLE IF NOT EXISTS chats (
 #: holds two setups with the same name must not stop the service from
 #: starting — the explicit check in :func:`rig_name_owner` still prevents
 #: new collisions, and this index only makes the race impossible.
+#: Columns added after the first deployment.  ``CREATE TABLE IF NOT
+#: EXISTS`` cannot grow a table that already exists, so these run
+#: separately and are tolerated exactly like the indexes: a database that
+#: already has them, or a statement an older Postgres refuses, must never
+#: stop the service from starting.
+MIGRATIONS = [
+    # a relayed tool call has to be answered, not just acknowledged
+    "ALTER TABLE commands ADD COLUMN IF NOT EXISTS result JSONB",
+    "ALTER TABLE commands ADD COLUMN IF NOT EXISTS done_at TIMESTAMPTZ",
+    # the connector's own credential, separate from rig_token so it can be
+    # revoked without the rig having to pair again
+    "ALTER TABLE rigs ADD COLUMN IF NOT EXISTS connector_hash TEXT",
+    # the tools THAT rig advertises: the rig is the source of truth, so a
+    # setup on an older Unisweep offers exactly what it can do
+    "ALTER TABLE rigs ADD COLUMN IF NOT EXISTS tools JSONB",
+]
+
 INDEXES = [
     "CREATE UNIQUE INDEX IF NOT EXISTS rigs_name_key "
     "ON rigs (lower(name)) WHERE name <> ''",
@@ -218,12 +235,13 @@ def initialize_database() -> bool:
         logger.error("database initialization failed — the service keeps "
                      "running and retries on every use")
         return False
-    for statement in INDEXES:
+    for statement in MIGRATIONS + INDEXES:
         try:
             with _cursor(commit=True) as cur:
                 cur.execute(statement)
         except Exception as exc:                       # noqa: BLE001
-            logger.warning("index not created (%s): %s", statement[:40], exc)
+            logger.warning("statement skipped (%s): %s",
+                           statement[:48], exc)
     return True
 
 
@@ -730,6 +748,72 @@ def commands_take(rig_id: str, limit: int = 10) -> Optional[list]:
     except Exception as exc:                           # noqa: BLE001
         logger.error("commands_take(%s) failed: %s", rig_id, exc)
         return None
+
+
+def command_finish(command_id: int, payload: dict) -> bool:
+    """Store what the rig reported, so a waiting call can be answered."""
+    try:
+        with _cursor(commit=True) as cur:
+            cur.execute(
+                "UPDATE commands SET result = %s, done_at = now() "
+                "WHERE id = %s",
+                (json.dumps(payload or {}), int(command_id)))
+        return True
+    except Exception as exc:                           # noqa: BLE001
+        logger.error("command_finish(%s) failed: %s", command_id, exc)
+        return False
+
+
+def rig_tools_set(rig_id: str, tools) -> bool:
+    """Remember the tool list this rig advertised when it said hello."""
+    try:
+        with _cursor(commit=True) as cur:
+            cur.execute("UPDATE rigs SET tools = %s WHERE rig_id = %s",
+                        (json.dumps(tools or []), rig_id))
+        return True
+    except Exception as exc:                           # noqa: BLE001
+        logger.error("rig_tools_set(%s) failed: %s", rig_id, exc)
+        return False
+
+
+# ---------------------------------------------------------- connectors ---
+#: ``<rig_id>.<secret>`` — the id travels with the token so a lookup is a
+#: primary-key read rather than a scan of every rig's hash.
+CONNECTOR_SEPARATOR = "."
+
+
+def connector_issue(rig_id: str) -> Optional[str]:
+    """Mint this rig's connector token, replacing any earlier one."""
+    secret = secrets.token_urlsafe(24)
+    try:
+        with _cursor(commit=True) as cur:
+            cur.execute("UPDATE rigs SET connector_hash = %s "
+                        "WHERE rig_id = %s",
+                        (token_hash(secret), rig_id))
+            if cur.rowcount == 0:
+                return ""
+    except Exception as exc:                           # noqa: BLE001
+        logger.error("connector_issue(%s) failed: %s", rig_id, exc)
+        return None
+    return f"{rig_id}{CONNECTOR_SEPARATOR}{secret}"
+
+
+def rig_by_connector(token: str) -> Optional[dict]:
+    """The rig this connector token belongs to.
+
+    ``None`` means the database is unreachable — the caller must say so
+    rather than "unauthorised", which would send somebody hunting for a
+    credential that is perfectly good. ``{}`` means the token is wrong.
+    """
+    rig_id, _, secret = (token or "").partition(CONNECTOR_SEPARATOR)
+    if not rig_id or not secret:
+        return {}
+    rig = rig_get(rig_id)
+    if rig is None:
+        return None
+    if not rig or not token_matches(secret, rig.get("connector_hash") or ""):
+        return {}
+    return rig
 
 
 def command_get(command_id: int) -> Optional[dict]:

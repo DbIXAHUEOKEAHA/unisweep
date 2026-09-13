@@ -33,7 +33,7 @@ from typing import Any
 
 from aiohttp import web
 
-from . import config, db, render
+from . import config, db, waiters, render
 from .formatting import (DEFAULT_PREFS, esc, fmt_duration, prefs_of,
                          unpack_snapshot)
 
@@ -275,6 +275,12 @@ async def push(request: web.Request) -> web.Response:
     if not await asyncio.to_thread(db.rig_seen, rig_id, state, sweep_state):
         return _fail(503, "database unavailable")
 
+    tools = data.get("tools")
+    if isinstance(tools, list) and tools:
+        # the rig is the source of truth for what it can do, so a setup on
+        # an older Unisweep advertises exactly what it has
+        await asyncio.to_thread(db.rig_tools_set, rig_id, tools[:200])
+
     links = await asyncio.to_thread(db.links_for_rig, rig_id)
     roster_known = links is not None
     if links is None:
@@ -293,6 +299,22 @@ async def push(request: web.Request) -> web.Response:
     commands = await asyncio.to_thread(db.commands_take, rig_id)
     if commands is None:
         commands = []
+    if not commands:
+        # Hold the beat open rather than sending an empty answer: a relayed
+        # tool call would otherwise wait for the next one, and an assistant
+        # that pauses fifteen seconds per question is an assistant nobody
+        # uses. The rig asks for this by sending hold_s; a rig that does
+        # not simply gets the old behaviour.
+        try:
+            hold = float(data.get("hold_s") or 0.0)
+        except (TypeError, ValueError):
+            hold = 0.0
+        if hold > 0:
+            if await waiters.wait_for_work(rig_id,
+                                           min(hold, config.MAX_HOLD_S)):
+                commands = await asyncio.to_thread(db.commands_take, rig_id)
+                if commands is None:
+                    commands = []
 
     marker = await asyncio.to_thread(db.snapshot_age_marker, rig_id)
     return web.json_response({
@@ -400,6 +422,28 @@ async def _progress_pings(rig: dict, links: list, state: dict) -> None:
         await asyncio.to_thread(db.link_touch_progress, rig_id, chat_id)
 
 
+@routes.post("/api/v1/connector")
+async def connector_token(request: web.Request) -> web.Response:
+    """Mint this rig's connector token, for pasting into Claude.
+
+    Rig-authenticated, so the credential is only ever handed to the
+    computer that owns the instruments. Issuing replaces any earlier one:
+    that is the revoke, and it is why this is separate from rig_token —
+    cutting off an assistant must not make the rig pair again.
+    """
+    rig, err = await _authenticate(request)
+    if err is not None:
+        return err
+    token = await asyncio.to_thread(db.connector_issue, rig["rig_id"])
+    if token is None:
+        return _fail(503, "database unavailable")
+    if not token:
+        return _fail(404, "unknown rig")
+    base = str(request.url.origin())
+    return web.json_response({"ok": True, "token": token,
+                              "url": f"{base}/mcp"})
+
+
 @routes.post("/api/v1/result")
 async def result(request: web.Request) -> web.Response:
     """What happened when the rig ran a command the bot sent it."""
@@ -416,6 +460,15 @@ async def result(request: web.Request) -> web.Response:
         return _fail(503, "database unavailable")
     if not command or command.get("rig_id") != rig["rig_id"]:
         return _fail(404, "no such command for this rig")
+    payload = {"ok": bool(data.get("ok")),
+               "result": data.get("result"),
+               "error": data.get("error") or "",
+               "detail": str(data.get("detail") or "")[:400]}
+    await asyncio.to_thread(db.command_finish, command_id, payload)
+    # a relayed tool call is somebody waiting on an open HTTPS request;
+    # a Telegram button press is nobody, and that is not an error
+    waiters.resolve(command_id, payload)
+
     chat_id = command.get("chat_id")
     if chat_id:
         ok = bool(data.get("ok"))
@@ -433,4 +486,6 @@ def build_app(bot_username: str = "") -> web.Application:
     app = web.Application(client_max_size=config.MAX_BODY_BYTES + 1024)
     app["bot_username"] = bot_username
     app.add_routes(routes)
+    from . import connector
+    app.add_routes(connector.routes)
     return app
