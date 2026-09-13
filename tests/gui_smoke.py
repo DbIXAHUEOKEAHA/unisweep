@@ -450,6 +450,40 @@ def lifecycle_check():
           f"closed {sorted(md.MockDevice.close_log)}")
 
 
+def _grid_collisions(widget, found=None, page=""):
+    """Widgets sharing one grid cell — i.e. one drawn on top of another.
+
+    This is how a control goes missing without anything failing: the
+    later widget covers the earlier one, the earlier one is still there,
+    still reachable, still in the control surface, and simply cannot be
+    seen or clicked. It has happened twice — a checkbox, then a button —
+    so it is checked rather than remembered.
+    """
+    if found is None:
+        found = []
+    taken: dict = {}
+    for child in widget.winfo_children():
+        try:
+            info = child.grid_info()
+        except Exception:                          # noqa: BLE001
+            info = {}
+        if info:
+            row = int(info.get("row", 0))
+            column = int(info.get("column", 0))
+            rows = int(info.get("rowspan", 1))
+            columns = int(info.get("columnspan", 1))
+            for r in range(row, row + rows):
+                for c in range(column, column + columns):
+                    if (r, c) in taken:
+                        found.append(
+                            f"{page}: {taken[(r, c)]} and "
+                            f"{child.winfo_class()} both at row {r} "
+                            f"column {c} of {widget.winfo_class()}")
+                    taken[(r, c)] = child.winfo_class()
+        _grid_collisions(child, found, page)
+    return found
+
+
 def control_surface_check():
     """The agent control surface, against the REAL widgets.
 
@@ -504,6 +538,17 @@ def control_surface_check():
     assert any(n.endswith(".type") for n in names), "no device rows"
     assert "sweep.intent" not in names and "sweep.campaign" not in names, \
         "the output card asks for nothing but a filename"
+
+    # ---- 1b. nothing is drawn on top of anything else ----------------
+    stacked = []
+    for name in ("Sweep", "Set & Get", "Settings", "Devices"):
+        app.show_page(name)
+        pump(0.3)
+        _grid_collisions(app.pages[name], stacked, name)
+    assert not stacked, "controls hidden under other controls:\n  " + \
+        "\n  ".join(stacked[:8])
+    app.show_page("Sweep")
+    pump(0.2)
 
     # ---- 2. typing into the fields -----------------------------------
     session.set_controls({"sweep.dimensions": "2D"})
