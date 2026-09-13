@@ -237,24 +237,29 @@ class SettingsPage(ttk.Frame):
                                          text="Copy client config",
                                          command=self._agent_copy)
         self.agent_copy_btn.grid(row=3, column=0, sticky="w", pady=(6, 2))
-        self.connector_btn = ttk.Button(
-            abody, text="Copy connector link (claude.ai)",
-            command=self._connector_copy)
-        self.connector_btn.grid(row=4, column=0, sticky="w", pady=(2, 2))
         self.agent_cmd = ttk.Label(abody, text="", style="MutedS.TLabel",
                                    justify="left", wraplength=560)
         self.agent_cmd.grid(row=3, column=1, columnspan=2, sticky="w",
                             padx=4)
+        self.connector_btn = ttk.Button(
+            abody, text="Copy connector link (claude.ai)",
+            command=self._connector_copy)
+        self.connector_btn.grid(row=4, column=0, sticky="w", pady=(2, 2))
+        ttk.Label(abody, text="for Settings → Connectors, on the web and "
+                              "your phone", style="MutedS.TLabel").grid(
+            row=4, column=1, columnspan=2, sticky="w", padx=4)
         ttk.Label(abody, style="MutedS.TLabel", justify="left",
                   wraplength=680, text=(
             "An assistant drives this same window: it fills in the fields "
             "and presses the buttons, and every change is visible here — "
             "you can take over at any moment. What it may do to an "
-            "instrument is bounded by the lab profile below. Give the "
-            "command above to your MCP client; the endpoint listens on "
-            "this machine only and needs the token in "
-            "config/agent_endpoint.json.")).grid(
-            row=4, column=0, columnspan=3, sticky="w", pady=(2, 0))
+            "instrument is bounded by the lab profile below.\n"
+            "Two ways in. The client config runs a pipe on this computer: "
+            "Claude Desktop and Claude Code only, nothing leaves the "
+            "machine. The connector link goes through the group's "
+            "notification service, so it works in claude.ai on any device "
+            "— issuing a new one revokes the old.")).grid(
+            row=5, column=0, columnspan=3, sticky="w", pady=(6, 0))
         self._refresh_agent_status()
 
         # ---------------- lab profile -----------------------------------
