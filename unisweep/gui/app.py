@@ -233,7 +233,27 @@ class App:
     def agent_command(self) -> str:
         """The command line to give a desktop MCP client."""
         import sys as _sys
-        return f'"{_sys.executable}" -m unisweep.agent.stdio --core-dir "{self.core_dir}"'
+        return (f'"{_sys.executable}" -m unisweep.agent.stdio '
+                f'--core-dir "{self.core_dir}"')
+
+    def agent_client_config(self) -> str:
+        """The whole server entry, ready to paste into an MCP client.
+
+        The bare command is not enough: ``-m unisweep.agent.stdio`` needs
+        the application's folder on sys.path, and a client launches the
+        pipe from its own working directory — so pasting just the command
+        gets "No module named 'unisweep'". The ``cwd`` here is the fix,
+        and ``--wait`` lets the client start before Unisweep does instead
+        of failing the handshake.
+        """
+        import json as _json
+        import sys as _sys
+        return _json.dumps({"mcpServers": {"unisweep": {
+            "command": _sys.executable,
+            "args": ["-m", "unisweep.agent.stdio",
+                     "--core-dir", self.core_dir, "--wait", "60"],
+            "cwd": self.core_dir,
+        }}}, indent=2)
 
     # ---------------- driver catalog auto-update -----------------------
     def refresh_catalog_async(self, manual: bool = False):

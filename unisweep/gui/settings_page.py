@@ -233,7 +233,8 @@ class SettingsPage(ttk.Frame):
                                       justify="left", wraplength=680)
         self.agent_status.grid(row=2, column=0, columnspan=3, sticky="w",
                                pady=(4, 0))
-        self.agent_copy_btn = ttk.Button(abody, text="Copy client command",
+        self.agent_copy_btn = ttk.Button(abody,
+                                         text="Copy client config",
                                          command=self._agent_copy)
         self.agent_copy_btn.grid(row=3, column=0, sticky="w", pady=(6, 2))
         self.agent_cmd = ttk.Label(abody, text="", style="MutedS.TLabel",
@@ -339,7 +340,10 @@ class SettingsPage(ttk.Frame):
         self._refresh_agent_status()
 
     def _agent_copy(self):
-        command = self.app.agent_command()
+        # the whole server entry, not the bare command: a client launches
+        # the pipe from its own directory, where 'unisweep' is not
+        # importable, and the cwd in here is what makes it work
+        command = self.app.agent_client_config()
         try:
             self.app.root.clipboard_clear()
             self.app.root.clipboard_append(command)

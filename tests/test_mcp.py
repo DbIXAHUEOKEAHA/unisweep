@@ -339,3 +339,32 @@ def test_the_pipe_explains_itself_when_unisweep_is_not_running():
     assert process.returncode != 0
     assert "no agent endpoint" in process.stderr
     assert "Settings page" in process.stderr
+
+
+def test_the_client_config_is_pasteable_as_it_stands():
+    """The bare command is not enough to hand someone.
+
+    ``python -m unisweep.agent.stdio`` needs the application's folder on
+    sys.path, and an MCP client launches the pipe from its OWN working
+    directory — so pasting just the command gets "No module named
+    'unisweep'" and an hour of confusion. The config carries the cwd that
+    makes it work, and a --wait so the client may start first.
+    """
+    import json
+    import sys as _sys
+    import types
+
+    from unisweep.gui.app import App
+
+    core = "/some/where/unisweep"
+    stub = types.SimpleNamespace(core_dir=core)
+    text = App.agent_client_config(stub)
+    entry = json.loads(text)["mcpServers"]["unisweep"]
+
+    assert entry["command"] == _sys.executable
+    assert entry["cwd"] == core, "without this the pipe cannot import it"
+    assert entry["args"][:2] == ["-m", "unisweep.agent.stdio"]
+    assert core in entry["args"], "the endpoint file is found by core dir"
+    assert "--wait" in entry["args"], \
+        "a client that starts before Unisweep must retry, not fail"
+    assert App.agent_command(stub).startswith('"')
