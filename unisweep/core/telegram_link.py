@@ -60,7 +60,7 @@ __all__ = ["TelegramLink", "DEFAULT_SERVICE_URL", "new_rig_identity"]
 #: Telegram bot token and the database password — live only in the
 #: server's environment variables and never leave it.  Publishing this
 #: string is exactly as safe as publishing a website address.
-DEFAULT_SERVICE_URL = "https://unisweep-production.up.railway.app"
+DEFAULT_SERVICE_URL = "https://unisweep-bot.up.railway.app"
 
 #: Overrides for people running their own copy, in this order:
 #: ``UNISWEEP_BOT_URL`` in the environment, then ``tg_service_url`` in
@@ -83,6 +83,7 @@ _API_PAIR = "/api/v1/pair"
 _API_PUSH = "/api/v1/push"
 _API_RESULT = "/api/v1/result"
 _API_UNLINK = "/api/v1/links/remove"
+_API_CONNECTOR = "/api/v1/connector"
 
 #: how much of the fast axis a phone-sized picture can usefully show
 MAX_TRACE_POINTS = 800
@@ -184,6 +185,7 @@ class TelegramLink:
                  cmap_getter: Callable = None,
                  status_cb: Callable = None,
                  command_cb: Callable = None,
+                 tool_cb: Callable = None,
                  rig_name: str = ""):
         self._data = live_data
         self._maps = live_maps
@@ -191,6 +193,10 @@ class TelegramLink:
         self._cmap_getter = cmap_getter or (lambda: "")
         self._status_cb = status_cb or (lambda text, state: None)
         self._command_cb = command_cb or (lambda cid, kind: None)
+        #: Runs one MCP tool call for the Claude connector and returns
+        #: {"ok":…, "result":…} — the same session the local endpoint
+        #: uses, so a relayed call and a local one are the same call.
+        self._tool_cb = tool_cb
 
         self._lock = threading.RLock()
         self._wake = threading.Event()
@@ -458,11 +464,22 @@ class TelegramLink:
             self._events.popleft()
             self._dropped += 1
 
-    def report_result(self, command_id: int, ok: bool, detail: str) -> None:
-        """The GUI calls this after running a command from the bot."""
+    def report_result(self, command_id: int, ok: bool, detail: str,
+                      result=None, error: str = "") -> None:
+        """The GUI calls this after running a command from the bot.
+
+        ``result`` / ``error`` carry a relayed tool call's answer, which
+        somebody is holding an HTTPS request open for; ``detail`` is the
+        line a Telegram user reads. Both travel on the same post.
+        """
+        entry = {"command_id": int(command_id), "ok": bool(ok),
+                 "detail": str(detail)[:400]}
+        if result is not None:
+            entry["result"] = result
+        if error:
+            entry["error"] = str(error)[:400]
         with self._lock:
-            self._results.append({"command_id": int(command_id),
-                                  "ok": bool(ok), "detail": str(detail)[:400]})
+            self._results.append(entry)
         self._wake.set()
 
     # ------------------------------------------------------------- thread --
@@ -527,46 +544,16 @@ class TelegramLink:
                                         timeout=self.timeout) as resp:
                 raw = resp.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as exc:
-            raise RuntimeError(self._http_error(exc, path)) from None
+            detail = exc.read().decode("utf-8", "replace")[:300]
+            try:
+                detail = json.loads(detail).get("error", detail)
+            except Exception:                          # noqa: BLE001
+                pass
+            raise RuntimeError(f"HTTP {exc.code}: {detail}") from None
         try:
             return json.loads(raw)
         except ValueError:
             raise RuntimeError("service returned something that is not JSON")
-
-    def _http_error(self, exc, path: str) -> str:
-        """A sentence about why the service said no.
-
-        The awkward cases are the ones where the answer never reached the
-        bot at all.  A hosting platform's edge replies in its own JSON,
-        which has no ``error`` key, so the raw blob used to be shown to a
-        physicist as-is — and the two it sends most are precisely the two
-        worth explaining:
-
-        * **404** on one of our own API paths.  The service defines every
-          one of them, so it can never answer 404 there; something else
-          did, which means nothing is running at this address.
-        * **502/503**, the edge reaching no container — usually a service
-          asleep or still booting, or a public domain whose target port
-          does not match the one the service listens on.
-        """
-        detail = ""
-        try:
-            detail = exc.read().decode("utf-8", "replace")[:300]
-        except Exception:                              # noqa: BLE001
-            pass
-        try:
-            body = json.loads(detail)
-            detail = str(body.get("error") or body.get("message") or detail)
-        except Exception:                              # noqa: BLE001
-            pass
-        if exc.code == 404 and path.startswith("/api/"):
-            return (f"no bot service is running at {self.service_url} — "
-                    f"the address this copy of Unisweep was built with may "
-                    f"be wrong ({detail or 'not found'})")
-        if exc.code in (502, 503):
-            return (f"{self.service_url} is not answering — the service may "
-                    f"be starting up or stopped ({detail or exc.code})")
-        return f"HTTP {exc.code}: {detail}"
 
     def _auth(self) -> dict:
         return {"X-Rig-Id": self.rig_id, "X-Rig-Token": self.rig_token}
@@ -577,6 +564,15 @@ class TelegramLink:
             payload = {"rig_id": self.rig_id, "rig_token": self.rig_token,
                        "name": self.rig_name,
                        "allow_control": self.allow_control, "version": 1}
+        if self._tool_cb is not None:
+            # What THIS setup can do, so the connector offers exactly that
+            # and the service never keeps a copy of the protocol that can
+            # drift out of step with the application.
+            try:
+                from ..agent.protocol import public_tools
+                payload["tools"] = public_tools()
+            except Exception:                          # noqa: BLE001
+                pass
         try:
             reply = self._post(_API_HELLO, payload)
         except RuntimeError as exc:
@@ -627,6 +623,25 @@ class TelegramLink:
                 "bot_link": self.bot_link,
                 "bot_username": self.bot_username}
 
+    def connector_token(self) -> dict:
+        """Ask the service for this setup's Claude connector credential.
+
+        Blocking, and called from the GUI thread when the button is
+        pressed — the user is standing there waiting for something to
+        paste. Issuing a new one revokes the old, which is the way to cut
+        an assistant off.
+        """
+        if not (self.service_url and self.rig_id and self.rig_token):
+            raise RuntimeError("this setup has no identity yet — open the "
+                               "Settings page so it can report once")
+        reply = self._post(_API_CONNECTOR, {}, self._auth())
+        token = str(reply.get("token") or "")
+        if not token:
+            raise RuntimeError("the service did not issue a token")
+        return {"token": token,
+                "url": str(reply.get("url") or "")
+                or f"{self.service_url}/mcp"}
+
     def refresh_links(self) -> list:
         """Re-read the roster now, outside the heartbeat.
 
@@ -659,6 +674,12 @@ class TelegramLink:
             state = self._state_payload()
         snapshot = self._build_snapshot() if due else None
         payload = {"state": state, "events": events}
+        if self._tool_cb is not None:
+            # Ask the service to hold the beat open rather than answering
+            # empty: a relayed tool call would otherwise wait for the next
+            # one, and an assistant that pauses for a whole heartbeat per
+            # question is an assistant nobody uses.
+            payload["hold_s"] = min(max(self.push_s, 5.0), 25.0)
         if snapshot:
             payload["snapshot"] = snapshot
 
@@ -703,6 +724,9 @@ class TelegramLink:
             if cid is not None:
                 self.report_result(cid, True, "snapshot sent")
             return
+        if kind == "mcp":
+            self._run_tool(cid, command.get("args") or {})
+            return
         if kind in ("pause", "resume", "stop", "to_zero"):
             if not self.allow_control:
                 if cid is not None:
@@ -716,6 +740,49 @@ class TelegramLink:
             except Exception as exc:                   # noqa: BLE001
                 if cid is not None:
                     self.report_result(cid, False, f"{type(exc).__name__}")
+
+    #: Tools that move an instrument. The connector marks them too, but
+    #: the refusal has to happen HERE: a server asking nicely is not
+    #: authorisation, and this is the side that owns the hardware.
+    CONTROL_TOOLS = frozenset({
+        "set_parameter", "stop_sweep", "pause_sweep", "resume_sweep",
+        "ramp_to_zero", "press_control", "set_controls",
+    })
+
+    def _run_tool(self, cid, args: dict) -> None:
+        """One tool call relayed from the Claude connector."""
+        name = str(args.get("tool") or "")
+        arguments = args.get("arguments")
+        if not isinstance(arguments, dict):
+            arguments = {}
+        if cid is None:
+            return
+        if self._tool_cb is None:
+            self.report_result(cid, False, "no assistant session",
+                               error="this setup is not serving the "
+                                     "assistant tools")
+            return
+        if name in self.CONTROL_TOOLS and not self.allow_control:
+            self.report_result(
+                cid, False, f"{name} refused",
+                error=(f"'{name}' moves an instrument, and remote control "
+                       f"is switched off on this setup — turn on 'Allow "
+                       f"pause/stop from Telegram' on its Settings page"))
+            return
+        try:
+            answer = self._tool_cb(name, arguments)
+        except Exception as exc:                       # noqa: BLE001
+            self.report_result(cid, False, f"{name} failed",
+                               error=f"{type(exc).__name__}: {exc}")
+            return
+        if not isinstance(answer, dict):
+            answer = {"result": answer}
+        if answer.get("error"):
+            self.report_result(cid, False, f"{name} failed",
+                               error=str(answer["error"]))
+            return
+        self.report_result(cid, True, f"{name} ran",
+                           result=answer.get("result", answer))
 
     def _status(self, text: str) -> None:
         try:

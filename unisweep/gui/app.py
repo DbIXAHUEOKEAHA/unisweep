@@ -76,6 +76,9 @@ class App:
         self._paused = False
         self.agent_service = None
         self.agent_error = ""
+        #: built on first use: the connector relays into the same session
+        #: the local endpoint uses
+        self._agent_session = None
         # the Telegram link is created once and reconfigured in place, so
         # a settings edit mid-sweep cannot lose its queued notifications
         self.tg_link = TelegramLink(
@@ -85,7 +88,8 @@ class App:
             status_cb=lambda text, state: self.event_queue.put(
                 ("tg_status", text, state)),
             command_cb=lambda cid, kind: self.event_queue.put(
-                ("tg_command", cid, kind)))
+                ("tg_command", cid, kind)),
+            tool_cb=self.run_agent_tool)
 
         # ---- layout ---------------------------------------------------
         self.root.columnconfigure(1, weight=1, minsize=700)
@@ -233,7 +237,55 @@ class App:
     def agent_command(self) -> str:
         """The command line to give a desktop MCP client."""
         import sys as _sys
-        return f'"{_sys.executable}" -m unisweep.agent.stdio --core-dir "{self.core_dir}"'
+        return (f'"{_sys.executable}" -m unisweep.agent.stdio '
+                f'--core-dir "{self.core_dir}"')
+
+    def run_agent_tool(self, name: str, arguments: dict) -> dict:
+        """One tool call, relayed here from the Claude connector.
+
+        The same session the local endpoint drives, so a call that came
+        over the group's service and one that came down a pipe on this
+        machine are the same call: the same controls, the same lab
+        profile limits, the same line in the journal. Called from the
+        link's thread — AgentSession is what marshals it onto the GUI's.
+        """
+        from ..agent.session import AgentSession
+        if self._agent_session is None:
+            self._agent_session = AgentSession(self)
+        try:
+            from ..agent.protocol import _BY_NAME
+            tool = _BY_NAME.get(name)
+        except Exception as exc:                       # noqa: BLE001
+            return {"error": f"{type(exc).__name__}: {exc}"}
+        method = getattr(self._agent_session, tool["method"], None) \
+            if tool else None
+        if method is None:
+            return {"error": f"there is no tool called '{name}'"}
+        try:
+            return {"result": method(**(arguments or {}))}
+        except TypeError as exc:
+            return {"error": f"{name}: {exc}"}
+        except Exception as exc:                       # noqa: BLE001
+            return {"error": f"{type(exc).__name__}: {exc}"}
+
+    def agent_client_config(self) -> str:
+        """The whole server entry, ready to paste into an MCP client.
+
+        The bare command is not enough: ``-m unisweep.agent.stdio`` needs
+        the application's folder on sys.path, and a client launches the
+        pipe from its own working directory — so pasting just the command
+        gets "No module named 'unisweep'". The ``cwd`` here is the fix,
+        and ``--wait`` lets the client start before Unisweep does instead
+        of failing the handshake.
+        """
+        import json as _json
+        import sys as _sys
+        return _json.dumps({"mcpServers": {"unisweep": {
+            "command": _sys.executable,
+            "args": ["-m", "unisweep.agent.stdio",
+                     "--core-dir", self.core_dir, "--wait", "60"],
+            "cwd": self.core_dir,
+        }}}, indent=2)
 
     # ---------------- driver catalog auto-update -----------------------
     def refresh_catalog_async(self, manual: bool = False):

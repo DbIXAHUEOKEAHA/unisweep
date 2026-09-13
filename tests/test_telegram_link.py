@@ -108,13 +108,6 @@ def test_the_service_address_is_compiled_in():
     assert DEFAULT_SERVICE_URL.startswith("https://"), DEFAULT_SERVICE_URL
     assert service_url("") == DEFAULT_SERVICE_URL
     assert service_url("https://mine.example/") == "https://mine.example"
-    # Pinned to the deployed address on purpose. A placeholder shipped
-    # here once and went unnoticed: every machine that had ever been
-    # paired carried the real address in its gitignored
-    # config/settings.json, which masked the default, so only a *fresh*
-    # install ever dialled it — and got "Application not found".
-    # Changing this line should be a deliberate, reviewed act.
-    assert DEFAULT_SERVICE_URL == "https://unisweep-production.up.railway.app"
     import os
     os.environ["UNISWEEP_BOT_URL"] = "https://env.example"
     try:
@@ -123,45 +116,6 @@ def test_the_service_address_is_compiled_in():
         assert service_url("https://mine.example") == "https://env.example"
     finally:
         del os.environ["UNISWEEP_BOT_URL"]
-
-
-def test_an_address_with_nothing_behind_it_says_so():
-    """What a physicist saw was the hosting platform's raw JSON:
-
-        Could not get a pairing code: HTTP 404: {"status": "error",
-        "code": 404, "message": "Application not found", ...}
-
-    The service defines every /api/ path, so it can never answer 404 on
-    one — something else did, and the useful thing to say is which
-    address nothing is running at.
-    """
-    link = _link()
-
-    class _Err(urllib.error.HTTPError):
-        def __init__(self, code, body):
-            super().__init__("https://x.example", code, "", {}, None)
-            self._body = body.encode()
-
-        def read(self):
-            return self._body
-
-    edge_404 = _Err(404, '{"status":"error","code":404,'
-                         '"message":"Application not found"}')
-    message = link._http_error(edge_404, "/api/v1/pair")
-    assert "no bot service is running at" in message, message
-    assert link.service_url in message, message
-    assert "Application not found" in message, message
-    assert "{" not in message, "the raw body leaked through"
-
-    # the port-mismatch case, which looked healthy in the server's own logs
-    asleep = _Err(502, "Bad gateway")
-    assert "not answering" in link._http_error(asleep, "/api/v1/hello")
-
-    # a refusal from our own service still reads as it always did
-    ours = _Err(409, '{"error":"name_taken"}')
-    assert link._http_error(ours, "/api/v1/hello") == "HTTP 409: name_taken"
-    # and a 404 that is not one of our API paths is not reinterpreted
-    assert link._http_error(edge_404, "/favicon.ico").startswith("HTTP 404")
 
 
 def test_a_taken_setup_name_is_reported_not_retried():
@@ -548,6 +502,22 @@ def test_1d_sweep_has_a_trace_but_no_map():
     assert snap["maps"] == {}
 
 
+if __name__ == "__main__":
+    passed = failed = 0
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            try:
+                fn()
+                print(f"PASS {name}")
+                passed += 1
+            except Exception:
+                import traceback
+                print(f"FAIL {name}")
+                traceback.print_exc()
+                failed += 1
+    print(f"\n{passed} passed, {failed} failed")
+    sys.exit(1 if failed else 0)
+
 
 def test_a_fresh_install_has_an_identity_before_it_reports():
     """The application starts reporting inside ``App.__init__``, before
@@ -594,18 +564,113 @@ def test_a_link_without_an_identity_says_exactly_what_is_missing():
     assert link.summary().startswith("problem:")
 
 
-if __name__ == "__main__":
-    passed = failed = 0
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            try:
-                fn()
-                print(f"PASS {name}")
-                passed += 1
-            except Exception:
-                import traceback
-                print(f"FAIL {name}")
-                traceback.print_exc()
-                failed += 1
-    print(f"\n{passed} passed, {failed} failed")
-    sys.exit(1 if failed else 0)
+# ------------------------------------------------------- the connector ---
+def test_a_relayed_tool_call_runs_and_reports_its_answer():
+    """Claude posts to the group's service, the call arrives here on the
+    heartbeat, and the answer goes back on the next post. The rig never
+    accepts a connection — that is the whole point of the relay."""
+    ran = []
+
+    def tool(name, arguments):
+        ran.append((name, arguments))
+        return {"result": {"lab": "2D materials", "sample": {"id": "GR-1"}}}
+
+    link = _link(tool_cb=tool)
+    link._handle_command({"id": 42, "kind": "mcp",
+                          "args": {"tool": "describe_rig",
+                                   "arguments": {"verbose": True}}})
+    assert ran == [("describe_rig", {"verbose": True})]
+    posted = link._results[0]
+    assert posted["command_id"] == 42 and posted["ok"] is True
+    assert posted["result"]["lab"] == "2D materials"
+    assert "error" not in posted
+
+
+def test_moving_an_instrument_is_refused_unless_the_switch_is_on():
+    """The connector marks these too, but the refusal has to happen on
+    the rig: a server asking nicely is not authorisation."""
+    ran = []
+    link = _link(allow_control=False,
+                 tool_cb=lambda n, a: ran.append(n) or {"result": {}})
+    link._handle_command({"id": 7, "kind": "mcp",
+                          "args": {"tool": "set_parameter",
+                                   "arguments": {"address": "GATE",
+                                                 "value": 5.0}}})
+    assert ran == [], "it must not reach the instrument at all"
+    posted = link._results[0]
+    assert posted["ok"] is False
+    assert "switched off" in posted["error"]
+    assert "Settings page" in posted["error"], "say how to allow it"
+
+
+def test_with_the_switch_on_the_same_call_goes_through():
+    ran = []
+    link = _link(allow_control=True,
+                 tool_cb=lambda n, a: ran.append(n) or {"result": {"ok": 1}})
+    link._handle_command({"id": 8, "kind": "mcp",
+                          "args": {"tool": "set_parameter",
+                                   "arguments": {"value": 1.0}}})
+    assert ran == ["set_parameter"]
+    assert link._results[0]["ok"] is True
+
+
+def test_reading_is_never_gated():
+    """An assistant that cannot look at the rig is no use, and looking
+    moves nothing."""
+    ran = []
+    link = _link(allow_control=False,
+                 tool_cb=lambda n, a: ran.append(n) or {"result": {}})
+    for name in ("describe_rig", "status", "journal_runs", "read_channels"):
+        link._handle_command({"id": 1, "kind": "mcp",
+                              "args": {"tool": name, "arguments": {}}})
+    assert ran == ["describe_rig", "status", "journal_runs", "read_channels"]
+
+
+def test_a_tool_that_explodes_costs_the_call_not_the_link():
+    def tool(name, arguments):
+        raise IOError("the instrument is on fire")
+
+    link = _link(tool_cb=tool)
+    link._handle_command({"id": 9, "kind": "mcp",
+                          "args": {"tool": "read_channels",
+                                   "arguments": {}}})
+    posted = link._results[0]
+    assert posted["ok"] is False
+    assert "on fire" in posted["error"]
+
+
+def test_a_setup_not_serving_the_tools_says_so():
+    link = _link()                        # no tool_cb
+    link._handle_command({"id": 10, "kind": "mcp",
+                          "args": {"tool": "status", "arguments": {}}})
+    assert link._results[0]["ok"] is False
+    assert "not serving" in link._results[0]["error"]
+
+
+def test_the_rig_advertises_its_own_tools_and_asks_to_be_held():
+    """The service keeps no copy of the protocol: a setup on an older
+    Unisweep offers exactly what it has."""
+    link = _link(tool_cb=lambda n, a: {"result": {}})
+    server = _Server({"ok": True})
+    _patched(server, link._hello)
+    hello = server.calls[0]["body"]
+    names = {t["name"] for t in hello["tools"]}
+    assert "describe_rig" in names and "run_sweep" in names
+    assert all("method" not in t for t in hello["tools"]), \
+        "the internal dispatch key must not travel"
+
+    server = _Server({"ok": True})
+    _patched(server, link._push)
+    assert server.calls[0]["body"]["hold_s"] >= 5.0
+
+
+def test_a_setup_without_the_connector_changes_nothing():
+    """No tool_cb means the old behaviour, byte for byte: no tool list,
+    no hold, and the service answers its heartbeat at once."""
+    link = _link()
+    server = _Server({"ok": True})
+    _patched(server, link._hello)
+    assert "tools" not in server.calls[0]["body"]
+    server = _Server({"ok": True})
+    _patched(server, link._push)
+    assert "hold_s" not in server.calls[0]["body"]

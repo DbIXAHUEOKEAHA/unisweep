@@ -39,6 +39,11 @@ TELEGRAM_BOT_TOKEN = _require("TELEGRAM_BOT_TOKEN")
 DATABASE_URL = _require("DATABASE_URL")
 
 # ---- where the HTTP ingest listens -------------------------------------
+#: Longest a heartbeat may be held open waiting for work. Beyond this the
+#: rig is answered empty and comes straight back: a held request is cheap,
+#: but one held forever survives a deploy as a stuck connection.
+MAX_HOLD_S = float(os.getenv("UNISWEEP_MAX_HOLD_S", "25"))
+
 #: Railway injects PORT. Binding 0.0.0.0 is required for its router.
 PORT = int(_num("PORT", 8080, int))
 HOST = os.getenv("HOST", "0.0.0.0").strip() or "0.0.0.0"
