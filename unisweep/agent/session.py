@@ -291,6 +291,22 @@ class AgentSession:
         person sees. Manual step tables are the one thing that cannot be
         typed — they come from a file, so use
         ``sweep.axisN.load_manual_steps`` with ``files=[path]``.
+
+        The program **fully determines** the page. Writing only the fields
+        the caller names sounds polite and is a trap: the page is not
+        empty. Raising the dimension count loads that dimension's preset,
+        so an unnamed field keeps the preset's value — while
+        :meth:`dry_run`, which reads the same dict through
+        ``program_from_dict``, sees the dataclass default. The two then
+        describe different sweeps, and the quote an assistant shows before
+        starting is not the sweep that starts. That really happened: a
+        2-D program with no ``walks`` priced at 10,201 points and ran
+        20,402, because the 2-D preset leaves ``walks=2`` on axis 2.
+
+        So the dict is canonicalised first and every field is written from
+        the canonical form. The invariant, which the tests check, is::
+
+            apply_program(P)["program"] == dry_run(P)["program"]
         """
         data = dict(program or {})
         axes = list(data.get("axes") or ())
@@ -299,33 +315,47 @@ class AgentSession:
         if len(axes) > 3:
             raise SessionError("Unisweep sweeps at most 3 dimensions")
 
+        # defaults resolved the same way dry_run resolves them, so that a
+        # field the caller left out cannot mean two different things
+        canonical = program_to_dict(self._program_from(data)[0])
+        canon_axes = list(canonical["axes"])
+
         # dimensions first: the axis cards below do not exist until it is set
         self.registry().set("sweep.dimensions", _DIM_LABELS[len(axes)])
 
         edits: dict = {}
         notes: list[str] = []
-        for index, axis in enumerate(axes, start=1):
+        clear_manual: list[str] = []
+        for index, (axis, given) in enumerate(zip(canon_axes, axes), start=1):
             prefix = f"sweep.axis{index}"
             for field in _AXIS_FIELDS:
                 if field == "mode":
-                    mode = axis.get("count_mode")
-                    if mode:
-                        edits[f"{prefix}.mode"] = _MODE_LABELS.get(
-                            str(mode), str(mode))
+                    edits[f"{prefix}.mode"] = _MODE_LABELS.get(
+                        str(axis["count_mode"]), str(axis["count_mode"]))
                     continue
-                if field in axis:
-                    edits[f"{prefix}.{field}"] = axis[field]
-            if axis.get("manual_points"):
+                edits[f"{prefix}.{field}"] = axis[field]
+            if given.get("manual_points"):
                 notes.append(
                     f"axis {index}: manual step tables are loaded from a "
                     f"file — press {prefix}.load_manual_steps with "
                     f"files=['<path>']")
+            else:
+                # a table left over from a preset or an earlier program
+                # would override start/stop/rate without appearing in any
+                # field the caller can see
+                clear_manual.append(f"{prefix}.clear_manual_steps")
         for key, control in (("reads", "sweep.reads"),
                              ("condition", "sweep.condition"),
                              ("filename", "sweep.filename"),
                              ("script", "sweep.script")):
-            if key in data:
-                edits[control] = data[key]
+            value = canonical.get(key)
+            edits[control] = list(value) if key == "reads" else value
+
+        for name in clear_manual:
+            try:
+                self.registry().press(name)
+            except Exception:                          # noqa: BLE001
+                pass                                   # nothing to clear
         applied = self.registry().set_many(edits) if edits else {}
         out = self.get_program()
         out["applied"] = applied

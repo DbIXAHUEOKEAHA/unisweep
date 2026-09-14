@@ -751,6 +751,42 @@ def test_dimensions_are_set_before_the_axis_cards_they_create(session):
     assert "sweep.axis2.stop" in session.registry()
 
 
+def test_what_dry_run_prices_is_what_apply_puts_on_the_page(session):
+    """The quote and the sweep have to be the same sweep.
+
+    Raising the dimension count loads that dimension's preset, so a field
+    the caller did not name keeps the preset's value -- while dry_run,
+    reading the same dict through program_from_dict, sees the dataclass
+    default. Observed on a live rig: a 2-D program with no 'walks' priced
+    at 10,201 points and ran 20,402, because the 2-D preset leaves
+    walks=2 on axis 2. An assistant that prices a run before starting it
+    is then lying to the person who approved it.
+    """
+    program = {
+        "axes": [{"device": "GATE", "parameter": "Volt", "start": 0.0,
+                  "stop": 100.0, "rate": 1.0, "delay": 0.001,
+                  "count_mode": "step"},
+                 {"device": "GATE", "parameter": "Volt", "start": 0.0,
+                  "stop": 100.0, "rate": 1.0, "delay": 0.001,
+                  "count_mode": "step"}],
+        "reads": ["GATE.Leak"],
+    }
+    # the leftover the preset (or a previous program) would have left
+    session.apply_program(program)
+    session.set_controls({"sweep.axis2.walks": 2, "sweep.condition": "x > 1"})
+
+    quoted = session.dry_run(program)
+    applied = session.apply_program(program)
+
+    assert applied["program"] == quoted["program"], \
+        "the page must build exactly the program dry_run priced"
+    assert applied["program"]["axes"][1]["walks"] == 1, \
+        "an unnamed field means its default, not whatever was lying there"
+    assert applied["program"]["condition"] == "", \
+        "a leftover condition silently masks the region that gets measured"
+    assert session.dry_run()["planned_points"] == quoted["planned_points"]
+
+
 def test_a_manual_step_table_is_reported_as_needing_a_file(session):
     result = session.apply_program({
         "axes": [{"device": "GATE", "parameter": "Volt",

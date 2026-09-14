@@ -1081,8 +1081,12 @@ class App:
         self._drain_to_telegram()
         # a last heartbeat is worth waiting a moment for: it carries that
         # event, and it is what stops the server reporting a clean quit as
-        # a computer that went quiet
-        self.tg_link.stop(join=2.0)
+        # a computer that went quiet. The join is short on purpose — the
+        # goodbye is sent synchronously inside stop(), so waiting on the
+        # beat thread afterwards buys nothing and the thread may be parked
+        # in a held request that no join will outlast. Every second spent
+        # here is a second of window that will not close.
+        self.tg_link.stop(join=0.5)
         self.plots.shutdown()
         self.setget_plots.shutdown()
         # every instrument whose library has close() gets it called

@@ -276,12 +276,18 @@ class TelegramLink:
         return True
 
     def stop(self, join: float = 2.0, final_push: bool = True) -> None:
-        if final_push:
-            self._final_push()
+        # the flag goes up FIRST: the beat thread may be parked in a held
+        # request right now, and nothing can cancel that urlopen, but it
+        # must not open another one behind our back while we say goodbye
         self._stop.set()
         self._wake.set()
+        if final_push:
+            self._final_push()
         thread = self._thread
         if thread is not None and join:
+            # a thread still inside a held request will not come back
+            # within any join worth waiting for -- and it does not need
+            # to: it is a daemon and the goodbye has already been sent
             thread.join(join)
         self._thread = None
         with self._lock:
@@ -322,6 +328,13 @@ class TelegramLink:
         moment ago actually leaves, and the rig reports itself idle — so a
         clean quit is not announced as "the rig went silent", which is
         what the watchdog on the server is for.
+
+        It runs on the Tk thread inside the close handler, so the window
+        is frozen for exactly as long as this takes. ``hold=False`` is
+        therefore not a detail: with the hold left on, the service keeps
+        the request open waiting for a tool call that cannot arrive from
+        an application that is closing, and every quit costs the whole
+        timeout.
         """
         self.note_shutdown()
         with self._lock:
@@ -332,7 +345,7 @@ class TelegramLink:
             self._snapshot_due = time.time() + self.snapshot_s
         saved, self.timeout = self.timeout, 6.0
         try:
-            self._push()
+            self._push(hold=False)
         except Exception:                              # noqa: BLE001
             pass                      # shutting down; nothing to report to
         finally:
@@ -664,7 +677,7 @@ class TelegramLink:
         self._status(self.summary())
         return bool(reply.get("ok"))
 
-    def _push(self) -> None:
+    def _push(self, hold: bool = True) -> None:
         with self._lock:
             events = list(self._events)
             results = list(self._results)
@@ -674,11 +687,17 @@ class TelegramLink:
             state = self._state_payload()
         snapshot = self._build_snapshot() if due else None
         payload = {"state": state, "events": events}
-        if self._tool_cb is not None:
+        if hold and self._tool_cb is not None:
             # Ask the service to hold the beat open rather than answering
             # empty: a relayed tool call would otherwise wait for the next
             # one, and an assistant that pauses for a whole heartbeat per
             # question is an assistant nobody uses.
+            #
+            # Never on the way out. The goodbye push runs on the Tk thread
+            # inside the window's close handler, so asking the service to
+            # hold it open freezes the window for the whole hold — the
+            # application takes seconds to close and looks hung while it
+            # waits for work that by definition will never come.
             payload["hold_s"] = min(max(self.push_s, 5.0), 25.0)
         if snapshot:
             payload["snapshot"] = snapshot

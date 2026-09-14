@@ -674,3 +674,46 @@ def test_a_setup_without_the_connector_changes_nothing():
     server = _Server({"ok": True})
     _patched(server, link._push)
     assert "hold_s" not in server.calls[0]["body"]
+
+
+# --------------------------------------------------- closing the window ---
+def test_the_goodbye_push_does_not_ask_the_service_to_hold_it():
+    """Quitting must not wait for work that cannot arrive.
+
+    With tool relay on, every heartbeat asks the service to hold the
+    request open rather than answer empty -- that is what makes a relayed
+    tool call answer in milliseconds instead of a whole beat. But the
+    final push runs on the Tk thread inside the window's close handler,
+    so a held request freezes the window for the length of the hold.
+    Observed as "Unisweep now takes a lot of time to close".
+    """
+    server = _Server()
+    link = _link(tool_cb=lambda name, args: {"ok": True})
+    link.link_status = "active"
+
+    _patched(server, lambda: link._push())
+    assert "hold_s" in server.calls[-1]["body"], \
+        "the ordinary beat still holds, or relayed tool calls get slow"
+
+    _patched(server, lambda: link.stop(join=0.0))
+    goodbye = server.calls[-1]["body"]
+    assert "hold_s" not in goodbye, \
+        "the service would hold the window's close handler open"
+    assert goodbye["state"]["state"] == "idle", \
+        "a clean quit must still report itself, or the watchdog cries wolf"
+
+
+def test_stop_raises_the_flag_before_it_says_goodbye():
+    """The beat thread must not open a fresh hold while we are leaving."""
+    server = _Server()
+    link = _link(tool_cb=lambda name, args: {"ok": True})
+    link.link_status = "active"
+    seen = []
+
+    def watch(request, timeout=None):
+        seen.append(link._stop.is_set())
+        return server(request, timeout)
+
+    _patched(watch, lambda: link.stop(join=0.0))
+    assert seen and all(seen), \
+        "stop() must set the flag before the final push, not after"
