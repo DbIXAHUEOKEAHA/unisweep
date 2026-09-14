@@ -271,20 +271,30 @@ class App:
     def agent_client_config(self) -> str:
         """The whole server entry, ready to paste into an MCP client.
 
-        The bare command is not enough: ``-m unisweep.agent.stdio`` needs
-        the application's folder on sys.path, and a client launches the
-        pipe from its own working directory — so pasting just the command
-        gets "No module named 'unisweep'". The ``cwd`` here is the fix,
-        and ``--wait`` lets the client start before Unisweep does instead
-        of failing the handshake.
+        The bare command is not enough: the pipe needs the application's
+        folder on sys.path, and a client launches it from its own working
+        directory — so pasting just the command gets "No module named
+        'unisweep'".
+
+        Three separate things are done about that, because clients differ
+        in which they honour. The command is the *launcher script* rather
+        than ``-m``, and a script puts its own folder on the path without
+        being told; ``PYTHONPATH`` says it again for anything that runs
+        the module form; and ``cwd`` says it a third time. Claude Desktop
+        ignores ``cwd``, which is exactly how this was found, so relying
+        on any one of them alone is how the endpoint silently fails to
+        start. ``--wait`` lets the client start before Unisweep does
+        instead of failing the handshake.
         """
         import json as _json
+        import os as _os
         import sys as _sys
+        launcher = _os.path.join(self.core_dir, "mcp_stdio.py")
         return _json.dumps({"mcpServers": {"unisweep": {
             "command": _sys.executable,
-            "args": ["-m", "unisweep.agent.stdio",
-                     "--core-dir", self.core_dir, "--wait", "60"],
+            "args": [launcher, "--core-dir", self.core_dir, "--wait", "60"],
             "cwd": self.core_dir,
+            "env": {"PYTHONPATH": self.core_dir},
         }}}, indent=2)
 
     # ---------------- driver catalog auto-update -----------------------

@@ -1,0 +1,90 @@
+{
+  "mcpServers": {
+    "blender": {
+      "command": "cmd",
+      "args": [
+        "/c",
+        "uvx",
+        "--python",
+        "3.12",
+        "blender-mcp"
+      ]
+    },
+    "unisweep": {
+      "command": "C:\\ProgramData\\anaconda3\\python.exe",
+      "args": [
+        "-m",
+        "unisweep.agent.stdio",
+        "--core-dir",
+        "C:\\Unisweep 2\\unisweep git",
+        "--wait",
+        "60"
+      ],
+      "cwd": "C:\\Unisweep 2\\unisweep git",
+      "env": {
+        "PYTHONPATH": "C:\\Unisweep 2\\unisweep git"
+      }
+    }
+  },
+  "coworkUserFilesPath": "C:\\Users\\kravt\\Claude",
+  "preferences": {
+    "coworkBrowserToolsEnabled": true,
+    "coworkPreferredBrowser": "built_in",
+    "launchPreviewPersistedWorkspaces": [],
+    "launchPreviewSessionScopedSessions": [],
+    "remoteSessionFolderGrants": {
+      "session_01M2rgLksHrXem56cVQPWMGw": [
+        "C:\\NUS\\Pbits\\pps"
+      ],
+      "session_016Jh3BNHMfRtTfGzAbKbQXp": [
+        "C:\\Unisweep 2\\unisweep git",
+        "C:\\Users\\kravt\\Downloads\\unisweep_ng\\unisweep_ng"
+      ],
+      "session_01CZKbFuxZjEy1H58yuGrjMe": [
+        "C:\\Unisweep 2\\unisweep git"
+      ]
+    },
+    "coworkLegacyRootGrantsPruned": true,
+    "coworkScheduledTasksEnabled": true,
+    "coworkHipaaRestricted": false,
+    "orgWorkAcrossAppsDisabled": false,
+    "ccdScheduledTasksEnabled": true,
+    "hybridDetectLatched": true,
+    "earlyWindowShowLatched": true,
+    "sidebarMode": "chat",
+    "bypassPermissionsGateByAccount": {
+      "0859be88-4724-4b31-b610-66eabf6cbc97": false
+    },
+    "coworkWebSearchEnabled": true,
+    "coworkModelAutoFallbackByAccount": {
+      "0859be88-4724-4b31-b610-66eabf6cbc97": true
+    },
+    "remoteToolsDeviceName": "misha-yoga",
+    "epitaxyPrefs": {
+      "starred-local-code-sessions": [],
+      "starred-cowork-spaces": [],
+      "starred-session-groups": [],
+      "dframe-local-slice": {
+        "pinnedOrder": [],
+        "homeProjectsPinnedOrder": []
+      },
+      "ccd-sessions-filter": {
+        "state": {
+          "selectedProjects": []
+        },
+        "version": 0
+      },
+      "desktop-frame.paneStore.v1": {
+        "state": {
+          "extraPanesByMode": {},
+          "colWeightsByMode": {},
+          "rowSplit": 0.5,
+          "draftNonce": 0
+        },
+        "version": 4
+      },
+      "dframe-group-scopes": {}
+    },
+    "chicagoEnabled": true
+  }
+}

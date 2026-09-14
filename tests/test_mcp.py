@@ -362,9 +362,49 @@ def test_the_client_config_is_pasteable_as_it_stands():
     entry = json.loads(text)["mcpServers"]["unisweep"]
 
     assert entry["command"] == _sys.executable
-    assert entry["cwd"] == core, "without this the pipe cannot import it"
-    assert entry["args"][:2] == ["-m", "unisweep.agent.stdio"]
     assert core in entry["args"], "the endpoint file is found by core dir"
     assert "--wait" in entry["args"], \
         "a client that starts before Unisweep must retry, not fail"
     assert App.agent_command(stub).startswith('"')
+
+    # three independent ways to find the package, because clients differ
+    # in which they honour -- Claude Desktop drops cwd, and with only cwd
+    # the server dies at startup with ModuleNotFoundError
+    import os as _os
+    assert entry["args"][0] == _os.path.join(core, "mcp_stdio.py"), \
+        "a script finds its own folder; -m has to be told where to look"
+    assert entry["cwd"] == core
+    assert entry["env"]["PYTHONPATH"] == core, \
+        "the fallback for a client that also drops the script's folder"
+
+
+def test_launcher_script_imports_without_cwd_or_pythonpath(tmp_path):
+    """The launcher must work from a directory that knows nothing.
+
+    This is the failure Claude Desktop produced: it launches the server
+    from its own working directory and ignores the entry's ``cwd``, so
+    ``python -m unisweep.agent.stdio`` cannot see the package and the
+    server exits before the handshake. Run the real launcher in a clean
+    process, from an unrelated cwd, with PYTHONPATH scrubbed -- if the
+    path bootstrap is missing this fails with ModuleNotFoundError.
+    """
+    import os
+    import subprocess
+    import sys
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    launcher = os.path.join(root, "mcp_stdio.py")
+    assert os.path.exists(launcher), "the config points clients at this file"
+
+    env = dict(os.environ)
+    env.pop("PYTHONPATH", None)
+    # no endpoint file in an empty core dir: reaching that complaint means
+    # the import worked, which is the whole point of the test
+    proc = subprocess.run(
+        [sys.executable, launcher, "--core-dir", str(tmp_path)],
+        cwd=str(tmp_path), env=env, capture_output=True, text=True,
+        timeout=60)
+
+    assert "No module named" not in proc.stderr, proc.stderr
+    assert "no agent endpoint" in proc.stderr, \
+        f"expected the endpoint complaint, got: {proc.stderr!r}"
