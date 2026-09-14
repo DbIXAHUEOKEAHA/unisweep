@@ -71,10 +71,40 @@ def _tool_result(result: Any) -> dict:
             "isError": False}
 
 
+def public_base(request: web.Request) -> str:
+    """The address the outside world reaches this service on.
+
+    Railway terminates TLS at its router and forwards plain HTTP, so the
+    request this process sees says ``http`` — and a connector URL that
+    starts with http is refused. The forwarded headers are what the
+    client actually asked for.
+    """
+    proto = (request.headers.get("X-Forwarded-Proto") or "").split(",")[0]
+    host = (request.headers.get("X-Forwarded-Host")
+            or request.headers.get("Host") or "").split(",")[0]
+    proto = proto.strip() or request.url.scheme
+    host = host.strip()
+    return f"{proto}://{host}" if host else str(request.url.origin())
+
+
+def connector_url(request: web.Request, token: str) -> str:
+    """Where to point Claude.
+
+    The token is IN the path because the connector dialog has one field —
+    a URL — and no way to send a header. That is weaker than a header:
+    URLs end up in browser history and proxy logs. It is made bearable by
+    being per-rig, replaceable at a button press, and useless for moving
+    an instrument unless that setup's control switch is also on.
+    """
+    return f"{public_base(request)}/mcp/{token}"
+
+
 async def _authenticate(request: web.Request):
-    """Bearer token → the rig it speaks for."""
-    header = (request.headers.get("Authorization") or "").strip()
-    token = header[7:].strip() if header[:7].lower() == "bearer " else ""
+    """The token, from the path or a header, → the rig it speaks for."""
+    token = (request.match_info.get("token") or "").strip()
+    if not token:
+        header = (request.headers.get("Authorization") or "").strip()
+        token = header[7:].strip() if header[:7].lower() == "bearer " else ""
     if not token:
         token = (request.headers.get("X-Unisweep-Token") or "").strip()
     if not token:
@@ -163,6 +193,7 @@ async def _dispatch(rig: dict, message: dict) -> Optional[dict]:
     return _rpc_error(ident, -32601, f"unknown method '{method}'")
 
 
+@routes.post("/mcp/{token}")
 @routes.post("/mcp")
 async def mcp(request: web.Request) -> web.Response:
     rig, err = await _authenticate(request)
@@ -190,6 +221,7 @@ async def mcp(request: web.Request) -> web.Response:
     return web.json_response(answer)
 
 
+@routes.get("/mcp/{token}")
 @routes.get("/mcp")
 async def mcp_stream(request: web.Request) -> web.Response:
     """Streamable HTTP allows a client to open a channel for
