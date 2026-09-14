@@ -439,9 +439,9 @@ async def connector_token(request: web.Request) -> web.Response:
         return _fail(503, "database unavailable")
     if not token:
         return _fail(404, "unknown rig")
-    base = str(request.url.origin())
+    from .connector import connector_url
     return web.json_response({"ok": True, "token": token,
-                              "url": f"{base}/mcp"})
+                              "url": connector_url(request, token)})
 
 
 @routes.post("/api/v1/result")

@@ -252,7 +252,7 @@ class SettingsPage(ttk.Frame):
         self.agent_cmd.grid(row=3, column=1, columnspan=2, sticky="w",
                             padx=4)
         self.connector_btn = ttk.Button(
-            abody, text="Copy connector link (claude.ai)",
+            abody, text="Copy connector URL (claude.ai)",
             command=self._connector_copy)
         self.connector_btn.grid(row=4, column=0, sticky="w", pady=(2, 2))
         ttk.Label(abody, text="for Settings → Connectors, on the web and "
@@ -374,16 +374,18 @@ class SettingsPage(ttk.Frame):
                 "Connector",
                 f"Could not get a connector token:\n\n{exc}")
             return
-        text = (f"URL:   {issued['url']}\n"
-                f"Token: {issued['token']}")
-        self._copy(text)
+        url = issued["url"]
+        self._copy(url)
         messagebox.showinfo(
             "Connector",
-            "Copied. In claude.ai open Settings → Connectors → Add custom "
-            "connector, paste the URL, and put the token in as a bearer "
-            "header.\n\nIssuing this replaces any earlier token, so an "
-            "assistant configured with the old one stops working.\n\n"
-            + text)
+            "Copied this setup's connector address:\n\n"
+            + url +
+            "\n\nIn claude.ai: Settings → Connectors → Add custom "
+            "connector, and paste it in. There is nothing else to fill "
+            "in — the address IS the credential, which is why it is "
+            "worth treating like one.\n\nPressing this button again "
+            "issues a new address and stops the old one working. That is "
+            "how you cut an assistant off.")
 
     def _agent_copy(self):
         # the whole server entry, not the bare command: a client launches

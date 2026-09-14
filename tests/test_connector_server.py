@@ -283,3 +283,77 @@ def test_an_unknown_method_is_a_protocol_error_not_a_crash(fake_db):
         finally:
             await client.close()
     assert run(scenario())["error"]["code"] == -32601
+
+
+# ---------------------------------------------------------------------------
+# the address is the credential
+# ---------------------------------------------------------------------------
+def test_the_token_travels_in_the_path_because_there_is_no_header_field(
+        fake_db):
+    """Claude's Add-custom-connector dialog has exactly one field: a URL.
+    No bearer header can be set from it, so an address that needs one
+    cannot be added at all."""
+    async def scenario():
+        client = await client_for(serve(fake_db))
+        try:
+            good = await client.post("/mcp/rig-1.s3cret", json={
+                "jsonrpc": "2.0", "id": 1, "method": "ping"})
+            bad = await client.post("/mcp/rig-1.wrong", json={
+                "jsonrpc": "2.0", "id": 1, "method": "ping"})
+            return good.status, (await good.json()), bad.status
+        finally:
+            await client.close()
+    status, body, bad = run(scenario())
+    assert status == 200 and body["result"] == {}
+    assert bad == 401
+
+
+def test_a_header_still_works_for_clients_that_can_send_one(fake_db):
+    """Claude Code and curl can; keeping both means the weaker form is
+    not forced on anything that does not need it."""
+    async def scenario():
+        client = await client_for(serve(fake_db))
+        try:
+            reply = await call(client, {"jsonrpc": "2.0", "id": 1,
+                                        "method": "ping"})
+            return reply.status
+        finally:
+            await client.close()
+    assert run(scenario()) == 200
+
+
+def test_the_address_says_https_even_though_railway_forwards_plain_http():
+    """TLS is terminated at the router, so this process sees http. A
+    connector URL that starts with http is refused, and the forwarded
+    headers are what the client actually asked for."""
+    from unisweep_bot.connector import connector_url, public_base
+
+    class Req:
+        def __init__(self, headers):
+            self.headers = headers
+            self.match_info = {}
+
+        @property
+        def url(self):
+            class U:
+                scheme = "http"
+
+                def origin(self):
+                    return "http://internal:8080"
+            return U()
+
+    behind_railway = Req({"X-Forwarded-Proto": "https",
+                          "X-Forwarded-Host": "unisweep-bot.up.railway.app",
+                          "Host": "internal:8080"})
+    url = connector_url(behind_railway, "rig-1.s3cret")
+    assert url.startswith("https://unisweep-bot.up.railway.app/mcp/"), url
+    assert url.endswith("/mcp/rig-1.s3cret")
+
+    # a proxy that sends a list takes the first entry, not the whole thing
+    chained = Req({"X-Forwarded-Proto": "https, http",
+                   "Host": "unisweep-bot.up.railway.app"})
+    assert public_base(chained) == "https://unisweep-bot.up.railway.app"
+
+    # run locally with no proxy in front: say what is actually true
+    plain = Req({"Host": "localhost:8080"})
+    assert public_base(plain) == "http://localhost:8080"
