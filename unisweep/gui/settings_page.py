@@ -19,7 +19,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from .theme import PALETTE
-from .widgets import Card, Tooltip, ValidatedEntry
+from .widgets import Card, ScrollFrame, Tooltip, ValidatedEntry
 
 
 class SettingsPage(ttk.Frame):
@@ -29,8 +29,18 @@ class SettingsPage(ttk.Frame):
         self.app = app
         st = app.settings
 
+        # The cards are taller than any window: on a 900 px screen the
+        # page ran out inside the Telegram card, and the three below it —
+        # the assistant endpoint, the LAB PROFILE, the driver repository —
+        # were not merely off-screen but unreachable, with nothing to
+        # scroll and no sign they existed. The sweep and devices pages
+        # have always been in one of these; this one was missed.
+        scroll = ScrollFrame(self)
+        scroll.pack(fill="both", expand=True)
+        page_body = scroll.inner
+
         # ---------------- appearance ------------------------------------
-        look = Card(self, title="Appearance")
+        look = Card(page_body, title="Appearance")
         look.pack(fill="x", padx=10, pady=(10, 4))
         lbody = ttk.Frame(look, style="Card.TFrame")
         lbody.grid(row=1, column=0, sticky="ew", pady=(4, 2))
@@ -58,7 +68,7 @@ class SettingsPage(ttk.Frame):
                         "immediately and to new ones by default.")
 
         # ---------------- map / data output ----------------------------
-        maps = Card(self, title="Map data output (2-D / 3-D sweeps)")
+        maps = Card(page_body, title="Map data output (2-D / 3-D sweeps)")
         maps.pack(fill="x", padx=10, pady=(10, 4))
         body = ttk.Frame(maps, style="Card.TFrame")
         body.grid(row=1, column=0, sticky="ew", pady=(4, 2))
@@ -121,7 +131,7 @@ class SettingsPage(ttk.Frame):
         # knowing where it is, so there is no address to type and nothing
         # to switch on.  What is left is the two things a person actually
         # does: hand out a code, and see (or revoke) who holds one.
-        noti = Card(self, title="Telegram notifications")
+        noti = Card(page_body, title="Telegram notifications")
         noti.pack(fill="x", padx=10, pady=4)
         nbody = ttk.Frame(noti, style="Card.TFrame")
         nbody.grid(row=1, column=0, sticky="ew", pady=(4, 2))
@@ -213,7 +223,7 @@ class SettingsPage(ttk.Frame):
                                  pady=(4, 0))
 
         # ---------------- assistant endpoint ----------------------------
-        agent = Card(self, title="Assistant endpoint (MCP)")
+        agent = Card(page_body, title="Assistant endpoint (MCP)")
         agent.pack(fill="x", padx=10, pady=4)
         abody = ttk.Frame(agent, style="Card.TFrame")
         abody.grid(row=1, column=0, sticky="ew", pady=(4, 2))
@@ -263,7 +273,7 @@ class SettingsPage(ttk.Frame):
         self._refresh_agent_status()
 
         # ---------------- lab profile -----------------------------------
-        prof = Card(self, title="Lab profile (safety envelope)")
+        prof = Card(page_body, title="Lab profile (safety envelope)")
         prof.pack(fill="x", padx=10, pady=4)
         pbody = ttk.Frame(prof, style="Card.TFrame")
         pbody.grid(row=1, column=0, sticky="ew", pady=(4, 2))
@@ -285,7 +295,7 @@ class SettingsPage(ttk.Frame):
         self._refresh_profile_status()
 
         # ---------------- driver repository ----------------------------
-        repo = Card(self, title="Driver repository (GitHub auto-discovery)")
+        repo = Card(page_body, title="Driver repository (GitHub auto-discovery)")
         repo.pack(fill="x", padx=10, pady=4)
         body = ttk.Frame(repo, style="Card.TFrame")
         body.grid(row=1, column=0, sticky="ew", pady=(4, 2))

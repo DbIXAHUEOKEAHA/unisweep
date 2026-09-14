@@ -450,6 +450,13 @@ def lifecycle_check():
           f"closed {sorted(md.MockDevice.close_log)}")
 
 
+def _scrolls(widget) -> bool:
+    for child in widget.winfo_children():
+        if child.winfo_class() == "Canvas" or _scrolls(child):
+            return True
+    return False
+
+
 def _grid_collisions(widget, found=None, page=""):
     """Widgets sharing one grid cell — i.e. one drawn on top of another.
 
@@ -547,6 +554,25 @@ def control_surface_check():
         _grid_collisions(app.pages[name], stacked, name)
     assert not stacked, "controls hidden under other controls:\n  " + \
         "\n  ".join(stacked[:8])
+
+    # ---- 1c. a page taller than the window has to scroll -------------
+    # Otherwise its lower half is not merely off-screen, it is
+    # unreachable: nothing to drag, no sign it exists. The settings page
+    # ran out inside the Telegram card for months, hiding the assistant
+    # endpoint, the lab profile and the driver repository.
+    app.root.geometry("1200x800")
+    pump(0.3)
+    for name in ("Sweep", "Set & Get", "Settings", "Devices"):
+        app.show_page(name)
+        pump(0.3)
+        page = app.pages[name]
+        room = app.container.winfo_height()
+        needed = page.winfo_reqheight()
+        if needed > room:
+            assert _scrolls(page), (
+                f"the {name} page needs {needed} px, has {room}, and "
+                f"cannot be scrolled — everything below the fold is "
+                f"unreachable")
     app.show_page("Sweep")
     pump(0.2)
 
