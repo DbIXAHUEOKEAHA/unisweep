@@ -276,11 +276,111 @@ class ParameterSpec:
 
 
 @dataclass(frozen=True)
+class InstrumentClass:
+    """A *kind* of instrument, not a particular one.
+
+    A lab profile that only described the boxes currently plugged in would
+    have to be rewritten every time something was swapped, and an
+    assistant reading it would learn nothing transferable. The classes
+    below are the general knowledge: what a lock-in is for, what a
+    source-measure unit can hurt, why an open-loop positioner is not a
+    closed-loop one. A specific address then says which class it belongs
+    to, and inherits the meaning.
+
+    ``signature`` is the part that makes this work for instruments the
+    profile has never heard of: it lists option names that identify the
+    kind. :meth:`LabProfile.classify` matches an unknown driver's own
+    option lists against every class's signature, so a box bought
+    tomorrow is still placed.
+    """
+
+    name: str
+    what: str = ""          # what this kind of instrument is, in one line
+    sets: str = ""          # what you command on one
+    reads: str = ""         # what it gives back
+    signature: tuple[str, ...] = ()   # option names that identify the kind
+    drivers: tuple[str, ...] = ()     # driver classes of this kind here
+    safety: str = ""        # what it can damage, and how
+    method: str = ""        # how to use one properly
+    notes: str = ""
+
+    def to_dict(self) -> dict:
+        out: dict[str, Any] = {}
+        for key, value in (("what", self.what), ("sets", self.sets),
+                           ("reads", self.reads), ("safety", self.safety),
+                           ("method", self.method), ("notes", self.notes)):
+            if value:
+                out[key] = value
+        if self.signature:
+            out["signature"] = list(self.signature)
+        if self.drivers:
+            out["drivers"] = list(self.drivers)
+        return out
+
+    @classmethod
+    def from_dict(cls, name: str, data: Any) -> "InstrumentClass":
+        data = data if isinstance(data, Mapping) else {}
+        def _tuple(key):
+            raw = data.get(key) or ()
+            if isinstance(raw, str):
+                raw = [raw]
+            return tuple(str(v) for v in raw)
+        return cls(
+            name=name,
+            what=str(data.get("what", "") or ""),
+            sets=str(data.get("sets", "") or ""),
+            reads=str(data.get("reads", "") or ""),
+            signature=_tuple("signature"),
+            drivers=_tuple("drivers"),
+            safety=str(data.get("safety", "") or ""),
+            method=str(data.get("method", "") or ""),
+            notes=str(data.get("notes", "") or ""),
+        )
+
+    def match_score(self, options: Iterable[str]) -> float:
+        """How much of this class's signature the given options cover.
+
+        A signature token counts when an option name is exactly it, or
+        when a long enough token appears inside an option name — driver
+        authors write ``LI_time_constant``, ``A_source_voltage`` and
+        ``volt1`` for concepts named ``time_constant``, ``source_voltage``
+        and ``volt``. Keep signatures short: the score is a fraction of
+        the tokens listed, so an exhaustive signature scores low on a
+        driver that legitimately exposes only part of it.
+        """
+        if not self.signature:
+            return 0.0
+        names = [str(o).lower() for o in options]
+        hits = 0
+        for want in self.signature:
+            w = want.lower()
+            for n in names:
+                if w == n:
+                    hits += 1
+                    break
+                # Substring matching only for tokens long enough to mean
+                # something. Without this a driver that exposes PID terms
+                # as 'P', 'I', 'D' matches every signature containing the
+                # letter p — which classified a cryostat as a positioner.
+                # One-directional on purpose: an option name may DECORATE
+                # a signature token ('LI_time_constant' carries
+                # 'time_constant', 'volt1' carries 'volt'), but an option
+                # that is merely a fragment of a token must not count — a
+                # cryostat exposing 'Field' was scoring against a magnet
+                # supply's 'field_rate' and out-ranking its own class.
+                if len(w) >= 4 and w in n:
+                    hits += 1
+                    break
+        return hits / len(self.signature)
+
+
+@dataclass(frozen=True)
 class DeviceSpec:
     """One instrument as the lab thinks of it."""
 
     address: str
     alias: str = ""                   # 'gate', 'lockin_xx', 'cryostat'
+    instrument_class: str = ""        # key into LabProfile.instrument_classes
     role: str = ""                    # free text: what it does here
     driver: str = ""                  # expected driver class (informational)
     notes: str = ""                   # wiring: which contacts, what gain
@@ -291,7 +391,9 @@ class DeviceSpec:
 
     def to_dict(self) -> dict:
         out: dict[str, Any] = {}
-        for key, value in (("alias", self.alias), ("role", self.role),
+        for key, value in (("alias", self.alias),
+                           ("class", self.instrument_class),
+                           ("role", self.role),
                            ("driver", self.driver), ("notes", self.notes)):
             if value:
                 out[key] = value
@@ -311,6 +413,9 @@ class DeviceSpec:
         return cls(
             address=address,
             alias=str(data.get("alias", "") or ""),
+            instrument_class=str(data.get("class",
+                                          data.get("instrument_class", ""))
+                                 or ""),
             role=str(data.get("role", "") or ""),
             driver=str(data.get("driver", "") or ""),
             notes=str(data.get("notes", "") or ""),
@@ -403,6 +508,8 @@ class LabProfile:
     lab: str = ""
     sample: Mapping[str, Any] = field(default_factory=dict)
     constants: Mapping[str, float] = field(default_factory=dict)
+    instrument_classes: Mapping[str, InstrumentClass] = \
+        field(default_factory=dict)
     devices: Mapping[str, DeviceSpec] = field(default_factory=dict)
     derived: Mapping[str, DerivedChannel] = field(default_factory=dict)
     interlocks: Interlocks = field(default_factory=Interlocks)
@@ -418,7 +525,8 @@ class LabProfile:
 
     @property
     def is_empty(self) -> bool:
-        return not self.devices and not self.derived and not self.constants
+        return (not self.devices and not self.derived and not self.constants
+                and not self.instrument_classes)
 
     # ---- persistence -------------------------------------------------
     @staticmethod
@@ -475,6 +583,9 @@ class LabProfile:
             "autonomy": self.autonomy,
             "sample": dict(self.sample),
             "constants": dict(self.constants),
+            "instrument_classes": {name: klass.to_dict()
+                                   for name, klass
+                                   in self.instrument_classes.items()},
             "devices": {addr: dev.to_dict()
                         for addr, dev in self.devices.items()},
             "derived": {name: ch.to_dict()
@@ -489,6 +600,11 @@ class LabProfile:
         devices = {str(addr): DeviceSpec.from_dict(str(addr), spec)
                    for addr, spec in (raw_devices.items()
                                       if isinstance(raw_devices, Mapping)
+                                      else ())}
+        raw_classes = data.get("instrument_classes", {})
+        classes = {str(name): InstrumentClass.from_dict(str(name), spec)
+                   for name, spec in (raw_classes.items()
+                                      if isinstance(raw_classes, Mapping)
                                       else ())}
         raw_derived = data.get("derived", {})
         derived = {str(name): DerivedChannel.from_dict(str(name), spec)
@@ -510,6 +626,7 @@ class LabProfile:
             lab=str(data.get("lab", "") or ""),
             sample=dict(data.get("sample", {}) or {}),
             constants=constants,
+            instrument_classes=classes,
             devices=devices,
             derived=derived,
             interlocks=Interlocks.from_dict(data.get("interlocks")),
@@ -588,6 +705,64 @@ class LabProfile:
         return {name: name for name in self.derived}
 
     # ---- description for humans and agents ---------------------------
+    def class_of(self, what: str) -> Optional[InstrumentClass]:
+        """The instrument class of a driver name, an address or an alias.
+
+        Falls back to the class named on the device entry, then to the
+        driver lists of every class.
+        """
+        if not what:
+            return None
+        key = str(what)
+        # A concrete instrument beats a category with the same name: a
+        # device aliased 'cryostat' is a particular box, and asking about
+        # it should not return the whole class of cryostats. Addresses and
+        # aliases are therefore resolved before class names.
+        device = self.devices.get(key)
+        if device is None:
+            for dev in self.devices.values():
+                if dev.alias == key:
+                    device = dev
+                    break
+        if device is not None:
+            if device.instrument_class in self.instrument_classes:
+                return self.instrument_classes[device.instrument_class]
+            key = device.driver or key
+        else:
+            klass = self.instrument_classes.get(key)
+            if klass is not None:
+                return klass
+            for dev in self.devices.values():
+                if dev.driver == key and \
+                        dev.instrument_class in self.instrument_classes:
+                    return self.instrument_classes[dev.instrument_class]
+        low = key.lower()
+        for klass in self.instrument_classes.values():
+            if any(d.lower() == low for d in klass.drivers):
+                return klass
+        return None
+
+    def classify(self, set_options: Iterable[str] = (),
+                 get_options: Iterable[str] = (),
+                 threshold: float = 0.30
+                 ) -> list[tuple[str, float]]:
+        """Guess the class of an instrument from its own option lists.
+
+        This is what makes the profile useful for hardware it has never
+        heard of: a new box is placed by what its driver *offers*, not by
+        what it is called. Returns ``(class name, score)`` best first;
+        empty when nothing matches well enough, which is itself an answer
+        worth reporting rather than guessing past.
+        """
+        options = list(set_options) + list(get_options)
+        if not options:
+            return []
+        scored = [(name, klass.match_score(options))
+                  for name, klass in self.instrument_classes.items()]
+        scored = [(n, round(sc, 3)) for n, sc in scored if sc >= threshold]
+        scored.sort(key=lambda t: (-t[1], t[0]))
+        return scored
+
     def describe(self) -> str:
         """A compact plain-text rendering — this is what an assistant is
         handed instead of the raw driver option lists."""
@@ -600,10 +775,39 @@ class LabProfile:
         if self.constants:
             bits = ", ".join(f"{k}={v:g}" for k, v in self.constants.items())
             lines.append(f"Constants: {bits}")
+        if self.instrument_classes:
+            lines.append("")
+            lines.append("INSTRUMENT CLASSES — the kinds of hardware this "
+                         "lab uses. A specific box inherits the meaning of "
+                         "its class; an unlisted box is placed by matching "
+                         "its option names against these signatures.")
+            for name, klass in self.instrument_classes.items():
+                lines.append(f"  [{name}] {klass.what}")
+                if klass.sets:
+                    lines.append(f"      sets:   {klass.sets}")
+                if klass.reads:
+                    lines.append(f"      reads:  {klass.reads}")
+                if klass.safety:
+                    lines.append(f"      SAFETY: {klass.safety}")
+                if klass.method:
+                    lines.append(f"      method: {klass.method}")
+                if klass.notes:
+                    lines.append(f"      note:   {klass.notes}")
+                if klass.drivers:
+                    lines.append("      drivers here: "
+                                 + ", ".join(klass.drivers))
+                if klass.signature:
+                    lines.append("      identified by: "
+                                 + ", ".join(klass.signature))
+            lines.append("")
+        if self.devices:
+            lines.append("CONFIGURED INSTRUMENTS — what is on this rig now.")
         for addr, dev in self.devices.items():
             head = addr
             if dev.alias:
                 head = f"{dev.alias} ({addr})"
+            if dev.instrument_class:
+                head += f"  [{dev.instrument_class}]"
             if dev.role:
                 head += f" — {dev.role}"
             lines.append(head)
