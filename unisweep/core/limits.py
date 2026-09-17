@@ -27,8 +27,19 @@ Design notes
   no protection at all.
 * **``max_step`` applies to jumps, not to ramps.** The engine hands a
   self-ramping instrument one ``set`` with a ``speed`` and lets it travel;
-  that is not a jump. A ``set`` with no speed *is*, and on a gate line that
-  is the dangerous one — so the step ceiling is enforced exactly there.
+  that is not a jump. Anything else *is*, and on a gate line that is the
+  dangerous one — so the step ceiling is enforced exactly there.
+
+  What decides which of the two a move is, is whether the **instrument**
+  ramps itself — its ``sweepable`` flag, passed in as ``ramps`` — not
+  whether a speed happened to be supplied. Those two came apart once: a
+  ``set`` with no speed had one derived from ``max_rate`` a few lines
+  above, and the jump check, which tested ``speed is None``, then never
+  ran at all. Every parameter carrying a ``max_rate`` silently lost its
+  step ceiling, which on the simulated rig was exactly the two gate
+  lines — the only ones where a single jump destroys the sample. A
+  stepwise source commanded at 5 V/s does not travel at 5 V/s: it
+  arrives, now.
 """
 
 from __future__ import annotations
@@ -90,12 +101,18 @@ class LimitPolicy:
     def check_set(self, address: str, parameter: str, value: float,
                   speed: Optional[float] = None,
                   current: Optional[float] = None,
-                  safety: bool = False) -> tuple[float, Optional[float]]:
+                  safety: bool = False,
+                  ramps: bool = False) -> tuple[float, Optional[float]]:
         """Validate one set. Returns the ``(value, speed)`` to actually use.
 
         Raises :class:`LimitViolation` for a refused move. With
         ``safety=True`` nothing is ever refused: the value is clamped into
         the allowed range and the rate ceiling still applies.
+
+        ``ramps`` says whether the instrument travels to the setpoint by
+        itself (the driver's ``sweepable`` flag for this parameter). It
+        defaults to False, so a caller that does not know treats the move
+        as a jump — the safe direction to be wrong in.
         """
         value = float(value)
         if not self.enabled:
@@ -129,8 +146,9 @@ class LimitPolicy:
             # a ramping instrument commanded without a rate still gets the
             # ceiling, so 'no speed given' can't mean 'slew at maximum'
             speed = float(spec.max_rate)
+        ramping = bool(ramps) and speed is not None
         if (spec.max_step is not None and current is not None
-                and speed is None and not safety):
+                and not ramping and not safety):
             try:
                 jump = abs(value - float(current))
             except (TypeError, ValueError):

@@ -157,7 +157,8 @@ class DriverAdapter:
         if policy is not None:
             value, speed = policy.check_set(
                 self.address, parameter, value, speed=speed,
-                current=self._last_set.get(parameter), safety=safety)
+                current=self._last_set.get(parameter), safety=safety,
+                ramps=self.sweepable(parameter))
         setter = getattr(self.raw, f"set_{parameter}")
         if speed is not None:
             try:

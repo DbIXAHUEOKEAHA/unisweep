@@ -228,9 +228,65 @@ def test_max_step_bounds_jumps_but_not_ramps():
     with pytest.raises(LimitViolation) as excinfo:
         policy.check_set("GATE", "Volt", 1.0, current=0.0)
     assert "max_step" in str(excinfo.value)
-    # the same move as a ramp is a travel instruction, not a jump
-    assert policy.check_set("GATE", "Volt", 1.0, speed=0.2,
-                            current=0.0) == (1.0, 0.2)
+    # the same move on a SELF-RAMPING instrument is a travel instruction
+    assert policy.check_set("GATE", "Volt", 1.0, speed=0.2, current=0.0,
+                            ramps=True) == (1.0, 0.2)
+    # ...but handing a rate to a stepwise source does not make it ramp
+    with pytest.raises(LimitViolation):
+        policy.check_set("GATE", "Volt", 1.0, speed=0.2, current=0.0)
+
+
+def gate_like_the_real_one():
+    """Both a step ceiling and a rate ceiling — the shape that broke."""
+    return LabProfile.empty().with_parameter(
+        "GATE", ParameterSpec(parameter="Volt", minimum=-60.0, maximum=60.0,
+                              max_step=1.0, max_rate=5.0))
+
+
+def test_a_max_rate_does_not_disarm_the_step_ceiling():
+    """The regression, and it was live on the rig.
+
+    A ``set`` with no speed had one derived from ``max_rate`` before the
+    jump check ran, and that check tested ``speed is None`` — so it never
+    fired for any parameter carrying a rate. On the simulated rig those
+    were exactly the two gate lines and nothing else: the only parameters
+    where a single jump destroys the sample were the only ones with no
+    step ceiling. An 83 V move was accepted in one command.
+    """
+    policy = LimitPolicy(gate_like_the_real_one())
+    for kwargs in ({}, {"speed": None}, {"speed": 5.0}):
+        with pytest.raises(LimitViolation) as excinfo:
+            policy.check_set("GATE", "Volt", -40.0, current=43.0, **kwargs)
+        assert "83" in str(excinfo.value)
+    # a genuinely self-ramping instrument still travels the same distance
+    assert policy.check_set("GATE", "Volt", -40.0, current=43.0,
+                            ramps=True)[0] == -40.0
+    # and a protective move is never refused, ramping or not
+    assert policy.check_set("GATE", "Volt", 0.0, current=43.0,
+                            safety=True)[0] == 0.0
+
+
+def test_the_adapter_takes_ramping_from_the_driver_not_the_rate():
+    """``ramps`` comes from the driver's own ``sweepable`` flag, which is
+    the only thing that knows whether the instrument travels or arrives."""
+    stepwise = LeakyGate()
+    assert stepwise.sweepable == [False]
+    adapter = PolicyRegistry(tempfile.mkdtemp(), {"GATE": stepwise},
+                             LimitPolicy(gate_like_the_real_one())
+                             ).connect("GATE")
+    adapter.set("Volt", 0.5)
+    with pytest.raises(LimitViolation):
+        adapter.set("Volt", 40.0)
+    assert stepwise.set_log == [0.5]              # never reached the device
+
+    ramping = LeakyGate()
+    ramping.sweepable = [True]
+    twin = PolicyRegistry(tempfile.mkdtemp(), {"GATE": ramping},
+                          LimitPolicy(gate_like_the_real_one())
+                          ).connect("GATE")
+    twin.set("Volt", 0.5)
+    twin.set("Volt", 40.0)                        # travels, so allowed
+    assert ramping.set_log == [0.5, 40.0]
 
 
 def test_the_adapter_is_the_choke_point():
