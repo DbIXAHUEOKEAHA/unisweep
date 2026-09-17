@@ -8,6 +8,7 @@ driver_bundle/
 data_files/
 2d_maps/
 setget/
+journal/
 .spyproject/
 .vscode/
 .idea/
