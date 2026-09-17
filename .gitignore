@@ -1,7 +1,16 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
-config/
+# Local machine configuration stays out of the repo -- addresses,
+# settings, presets and the generated agent endpoint are all specific
+# to one rig. The lab profile is the exception: it is the part another
+# lab can actually reuse (the instrument classes and the safety
+# procedure), and without it a fresh clone starts with no profile at
+# all. Editing your own copy will therefore show up as a change --
+# that is the cost of shipping a working default.
+config/*
+!config/lab_profile.json
+!config/lab_profile.sim.json
 resources/
 driver_bundle/
 [0-9][0-9][0-9][0-9][0-9][0-9]/

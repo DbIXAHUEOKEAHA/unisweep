@@ -988,3 +988,51 @@ def test_a_dual_gated_device_separates_density_from_field(clock):
     sim.set_top_gate_voltage(-2.0 * ratio)
     clock.tick(1.0)
     assert sim.displacement_field() == pytest.approx(d_pos, rel=1e-6)
+
+
+# ==========================================================================
+# loading drivers the way the running application does
+# ==========================================================================
+def test_driver_modules_can_be_reloaded():
+    """Found by running main.py from an IPython console.
+
+    Drivers are registered in sys.modules under 'unisweep_drivers.<Name>',
+    and Python resolves the PARENT of a dotted name before doing anything
+    else with it. The parent package was never created, so every reload
+    raised "parent 'unisweep_drivers' not in sys.modules". Nothing in
+    Unisweep reloads a driver, so it stayed invisible — until autoreload,
+    which tries on every cell and printed a traceback per driver.
+    """
+    import importlib
+    from unisweep.core.devices import DeviceRegistry, DRIVER_PACKAGE
+
+    core = os.path.dirname(DEVICES_DIR)
+    registry = DeviceRegistry(core)
+    if not registry.driver_classes:
+        pytest.skip("no drivers installed in resources/")
+    assert DRIVER_PACKAGE in sys.modules, \
+        "the driver parent package was never registered"
+
+    failures = []
+    for name in list(registry.driver_classes):
+        module = sys.modules.get(f"{DRIVER_PACKAGE}.{name}")
+        assert module is not None, f"{name} is not in sys.modules"
+        try:
+            importlib.reload(module)
+        except Exception as exc:               # noqa: BLE001
+            failures.append(f"{name}: {type(exc).__name__}: {exc}")
+    assert not failures, "; ".join(failures)
+
+
+def test_the_registry_still_works_after_a_driver_is_reloaded(sim, clock):
+    import importlib
+    from unisweep.core.devices import DeviceRegistry, DRIVER_PACKAGE
+
+    core = os.path.dirname(DEVICES_DIR)
+    registry = DeviceRegistry(core)
+    if "SimGate" not in registry.driver_classes:
+        pytest.skip("SimGate is not installed in resources/")
+    importlib.reload(sys.modules[f"{DRIVER_PACKAGE}.SimGate"])
+    adapter = registry.connect("SIM::GATE")
+    adapter.set("voltage", 12.0)
+    assert adapter.get("voltage") == pytest.approx(12.0, abs=1e-6)

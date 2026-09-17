@@ -33,7 +33,38 @@ from typing import Callable, Optional
 import numpy as np
 
 __all__ = ["VirtualTime", "DriverAdapter", "DeviceRegistry",
-           "probe_sweepable"]
+           "probe_sweepable", "DRIVER_PACKAGE"]
+
+DRIVER_PACKAGE = "unisweep_drivers"
+"""Namespace the driver files in ``resources`` are imported under.
+
+Dotted so a driver called ``time.py`` or ``json.py`` cannot shadow a
+stdlib module. The package itself has to exist in ``sys.modules`` — see
+:func:`_ensure_driver_package`.
+"""
+
+
+def _ensure_driver_package(resources_dir: str):
+    """Register the parent package the driver modules live under.
+
+    Drivers are registered as ``unisweep_drivers.<Name>``, and Python's
+    reload machinery resolves the PARENT of a dotted name before doing
+    anything else. Without this stub every driver raises
+
+        ImportError: parent 'unisweep_drivers' not in sys.modules
+
+    the moment something tries to reload it. Nothing in Unisweep reloads
+    drivers, so this was invisible — until you run ``main.py`` from an
+    IPython console with autoreload on, which tries to reload every
+    module on every cell and prints a traceback per driver.
+    """
+    import types
+    package = sys.modules.get(DRIVER_PACKAGE)
+    if package is None:
+        package = types.ModuleType(DRIVER_PACKAGE)
+        sys.modules[DRIVER_PACKAGE] = package
+    package.__path__ = [resources_dir]      # type: ignore[attr-defined]
+    return package
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +272,7 @@ def _import_driver_classes(resources_dir: str
     # Some repo drivers import through the repository package name
     # ('from devices.X import ...'). Provide a namespace alias so that
     # resolves against resources/ without the full repo layout.
+    package = _ensure_driver_package(resources_dir)
     import types
     dev_mod = sys.modules.get("devices")
     if dev_mod is None or resources_dir not in getattr(dev_mod, "__path__",
@@ -255,9 +287,10 @@ def _import_driver_classes(resources_dir: str
         path = os.path.join(resources_dir, fname)
         try:
             spec = importlib.util.spec_from_file_location(
-                f"unisweep_drivers.{mod_name}", path)
+                f"{DRIVER_PACKAGE}.{mod_name}", path)
             module = importlib.util.module_from_spec(spec)
             sys.modules[spec.name] = module
+            setattr(package, mod_name, module)
             spec.loader.exec_module(module)          # type: ignore[union-attr]
             cls = _driver_class_of(module, mod_name)
             if cls is not None:
