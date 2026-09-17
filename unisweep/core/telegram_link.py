@@ -60,7 +60,7 @@ __all__ = ["TelegramLink", "DEFAULT_SERVICE_URL", "new_rig_identity"]
 #: Telegram bot token and the database password — live only in the
 #: server's environment variables and never leave it.  Publishing this
 #: string is exactly as safe as publishing a website address.
-DEFAULT_SERVICE_URL = "https://unisweep-bot.up.railway.app"
+DEFAULT_SERVICE_URL = "https://unisweep-production.up.railway.app"
 
 #: Overrides for people running their own copy, in this order:
 #: ``UNISWEEP_BOT_URL`` in the environment, then ``tg_service_url`` in
@@ -557,16 +557,46 @@ class TelegramLink:
                                         timeout=self.timeout) as resp:
                 raw = resp.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")[:300]
-            try:
-                detail = json.loads(detail).get("error", detail)
-            except Exception:                          # noqa: BLE001
-                pass
-            raise RuntimeError(f"HTTP {exc.code}: {detail}") from None
+            raise RuntimeError(self._http_error(exc, path)) from None
         try:
             return json.loads(raw)
         except ValueError:
             raise RuntimeError("service returned something that is not JSON")
+
+    def _http_error(self, exc, path: str) -> str:
+        """A sentence about why the service said no.
+
+        The awkward cases are the ones where the answer never reached the
+        bot at all.  A hosting platform's edge replies in its own JSON,
+        which has no ``error`` key, so the raw blob used to be shown to a
+        physicist as-is — and the two it sends most are precisely the two
+        worth explaining:
+
+        * **404** on one of our own API paths.  The service defines every
+          one of them, so it can never answer 404 there; something else
+          did, which means nothing is running at this address.
+        * **502/503**, the edge reaching no container — usually a service
+          asleep or still booting, or a public domain whose target port
+          does not match the one the service listens on.
+        """
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", "replace")[:300]
+        except Exception:                              # noqa: BLE001
+            pass
+        try:
+            body = json.loads(detail)
+            detail = str(body.get("error") or body.get("message") or detail)
+        except Exception:                              # noqa: BLE001
+            pass
+        if exc.code == 404 and path.startswith("/api/"):
+            return (f"no bot service is running at {self.service_url} — "
+                    f"the address this copy of Unisweep was built with may "
+                    f"be wrong ({detail or 'not found'})")
+        if exc.code in (502, 503):
+            return (f"{self.service_url} is not answering — the service may "
+                    f"be starting up or stopped ({detail or exc.code})")
+        return f"HTTP {exc.code}: {detail}"
 
     def _auth(self) -> dict:
         return {"X-Rig-Id": self.rig_id, "X-Rig-Token": self.rig_token}
