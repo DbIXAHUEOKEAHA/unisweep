@@ -266,6 +266,36 @@ def test_a_max_rate_does_not_disarm_the_step_ceiling():
                             safety=True)[0] == 0.0
 
 
+def test_the_first_set_of_a_session_is_not_a_free_jump():
+    """Found on the live rig: 0 -> 2 V was accepted and 2 -> 0 V refused,
+    same distance, because only the second had a value to measure from.
+    ``_last_set`` remembers what we commanded and starts empty, so the
+    first command of a session escaped the ceiling at any size. The
+    adapter now seeds it from the instrument's own readback."""
+    gate = LeakyGate()
+    gate._v = 0.0
+    adapter = PolicyRegistry(tempfile.mkdtemp(), {"GATE": gate},
+                             LimitPolicy(gate_like_the_real_one())
+                             ).connect("GATE")
+    with pytest.raises(LimitViolation):
+        adapter.set("Volt", 40.0)                 # the very first set
+    assert gate.set_log == []                     # never reached the device
+    adapter.set("Volt", 0.8)                      # inside the ceiling
+    assert gate.set_log == [0.8]
+
+
+def test_an_unreadable_parameter_still_sets():
+    """Seeding is best-effort: a write-only parameter has nothing to read
+    back, and must not become unsettable because of it."""
+    gate = LeakyGate()
+    gate.get_options = []                         # nothing readable
+    adapter = PolicyRegistry(tempfile.mkdtemp(), {"GATE": gate},
+                             LimitPolicy(gate_like_the_real_one())
+                             ).connect("GATE")
+    adapter.set("Volt", 40.0)
+    assert gate.set_log == [40.0]
+
+
 def test_the_adapter_takes_ramping_from_the_driver_not_the_rate():
     """``ramps`` comes from the driver's own ``sweepable`` flag, which is
     the only thing that knows whether the instrument travels or arrives."""

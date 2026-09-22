@@ -144,6 +144,28 @@ class DriverAdapter:
     def can_read(self, parameter: str) -> bool:
         return parameter in self.get_options
 
+    def _current(self, parameter: str) -> Optional[float]:
+        """Where the instrument stands now, for the step ceiling.
+
+        ``_last_set`` only remembers what *we* commanded, so it is empty
+        for every parameter until the first set of a session — and a jump
+        cannot be measured without a value to measure it from. The first
+        command after a restart was therefore unguarded whatever its size:
+        on a gate line, the entire range in one go, which is the exact
+        move the ceiling exists to stop.
+
+        So ask the instrument the first time, and remember the answer.
+        Seeding once rather than reading every time keeps the measurement
+        loop free of extra I/O — after the first set the engine is the
+        only thing moving the parameter, so our record stays true.
+        """
+        if parameter not in self._last_set and self.can_read(parameter):
+            try:
+                self._last_set[parameter] = float(self.get(parameter))
+            except Exception:                     # noqa: BLE001
+                pass                              # unreadable: as before
+        return self._last_set.get(parameter)
+
     def set(self, parameter: str, value: float,
             speed: Optional[float] = None, safety: bool = False) -> None:
         """Command a parameter, subject to the lab profile's envelope.
@@ -157,7 +179,7 @@ class DriverAdapter:
         if policy is not None:
             value, speed = policy.check_set(
                 self.address, parameter, value, speed=speed,
-                current=self._last_set.get(parameter), safety=safety,
+                current=self._current(parameter), safety=safety,
                 ramps=self.sweepable(parameter))
         setter = getattr(self.raw, f"set_{parameter}")
         if speed is not None:

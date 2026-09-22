@@ -36,10 +36,16 @@ the point where the quadrature becomes noticeable, the sample or the
 wiring is reactive and X is no longer just a resistance.
 
 **The thermometer measures the bath, not the electrons.** Once current
-flows or the beam is on, the electron temperature is somewhere else. A
-microamp lifts it several kelvin above 4 K on an ordinary device; ten
-microamps lifts it by tens. A bias sweep is a temperature sweep whether or
-not that was the intention.
+flows or the beam is on, the electron temperature is somewhere else. How
+far is a property of the device, not a constant: the heating goes as
+`I^2 R`, and the cooling coupling scales with carrier density, so the same
+current lifts a resistive, lightly doped device far more than a degenerate
+one. Order of magnitude on an ordinary device at 4 K, tenths of a kelvin
+at a microamp and several to tens of kelvin at ten microamps — but do not
+carry those as numbers. Measure the onset on the device in front of you:
+sweep the bias, watch Rxx against a low-current baseline, and find where
+it leaves it. A bias sweep is a temperature sweep whether or not that was
+the intention.
 
 ---
 
@@ -207,8 +213,10 @@ Why they differ: at sub-THz the coupling structure is an antenna, and an
 antenna is wavelength-scale, so the beam *can* resolve it. Its lobes sit
 symmetrically about the device, because that is lithography. Their
 strengths are not equal, because that is fabrication. So the maximum lands
-on the stronger lobe, the intensity centroid is dragged the same way, and
-only the **geometric centre of the lobe positions** is the device.
+on the stronger lobe. The intensity centroid is pulled the same way but
+far less, being weighted by the whole pattern rather than by its brightest
+point — on the simulated rig roughly 0.08 mm against the maximum's 0.45 —
+and only the **geometric centre of the lobe positions** is the device.
 
 Find the features, take their geometric centre, and keep their brightness
 out of the arithmetic. On the simulated rig taking the maximum instead
