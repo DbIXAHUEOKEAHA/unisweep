@@ -7,7 +7,7 @@ import glob
 import serial
 
 class _8MTF_75LS05():
-    def __init__(self, adress = 'COM5'):
+    def __init__(self, adress = 'COM9'):
         print(f'XStage adress is {adress}')
         num = [str(int(x)) for x in adress if x.isdigit()]
         ind = ''
@@ -32,8 +32,8 @@ class _8MTF_75LS05():
         
         self.set_options = ['position', 'shift']
         self.sweepable = [True, True]
-        self.maxspeed = [20, 20]
-        self.eps = [0.01, 0.01]
+        self.maxspeed = [10, 10]
+        self.eps = [0.1, 0.1]
         self.get_options = ['position', 'I_pwr', 'U_pwr', 'T_proc']
         
         self.left_border = -14250
@@ -287,14 +287,18 @@ class _8MTF_75LS05():
     
     def set_position(self, value, speed = None):
         
+        value = float(value)
+        
         if speed == None:
-            if  not self.status_running():
-                result = lib.command_move_calb(self.device_id, c_float(value), byref(self.user_unit))
+            result = lib.command_move_calb(self.device_id, c_float(value), byref(self.user_unit))
+        elif speed == 'SetGet':
+            speed = float(self.maxspeed[0])
+            self.set_speed(speed)
+            result = lib.command_move_calb(self.device_id, c_float(value), byref(self.user_unit))
         else:
             speed = abs(speed)
-            if  not self.status_running():
-                self.set_speed(speed)
-                result = lib.command_move_calb(self.device_id, c_float(value), byref(self.user_unit))
+            self.set_speed(speed)
+            result = lib.command_move_calb(self.device_id, c_float(value), byref(self.user_unit))
     
     def set_shift(self, value, speed = None):
         if speed == None:
@@ -415,16 +419,22 @@ class _8MTF_75LS05():
         currStatus.MvCmdSts = 0x08
         
         self.result = lib.get_status(self.device_id, byref(currStatus))
-        print(self.result)
+        
+    def set_zero(self):
+        if not self.status_running():
+            result = lib.command_zero(self.device_id)
+            if result == Result.Ok:
+                print('New zero set')
 
     def close(self):
         lib.close_device(byref(cast(self.device_id, POINTER(c_int))))
 
 def main():
-    adress = 'COM3'
-    stage = _8MTF_75LS05(adress)  
-    #stage.set_position(-20, 10)
-
+    adress = 'COM5'
+    stage = _8MTF_75LS05(adress)
+    #stage.stop()
+    #stage.set_position(10, 1)
+    stage.set_zero()
     try:
         print(f'Current position is {stage.position()}')
     except:
