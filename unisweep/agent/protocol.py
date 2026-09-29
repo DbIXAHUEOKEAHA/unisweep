@@ -70,7 +70,85 @@ PROGRAM_SCHEMA = {
     },
 }
 
+STEP_SCHEMA = {
+    "type": "object",
+    "description": ("One step of a plan: 'purpose' says what it is for in "
+                    "a phrase, 'program' is a sweep program in the same "
+                    "shape dry_run and apply_program take."),
+    "properties": {"purpose": _STR, "program": PROGRAM_SCHEMA},
+}
+
 TOOLS = [
+    # ---- knowing what you are for ------------------------------------
+    _tool("get_assignment", "get_assignment", read_only=True, properties={
+        "name": dict(_STR, description="Which assignment. Omit to list "
+                                       "the ones that exist.")},
+        description="""
+What this session is for: the question in the supervisor's own words, the
+sample, the constraints, and the acceptance criteria that decide whether
+the work is finished.
+
+Call this before planning anything. describe_rig tells you what the
+instruments are; this tells you what you are supposed to find out, and
+the two answer different questions. With no name it lists what exists.
+
+The acceptance criteria are checked by report_finding, against facts read
+out of the runs you cite — not against what you say about your own work.
+Read them before you plan: they tell you what the data has to cover.
+"""),
+    _tool("propose_plan", "propose_plan", read_only=True, properties={
+        "assignment": dict(_STR, description="Check the plan against this "
+                                             "assignment's criteria."),
+        "steps": {"type": "array", "items": STEP_SCHEMA}},
+        required=["steps"], description="""
+Price a whole plan before any of it runs. Every step goes through the
+same pre-flight as dry_run, so the point counts, durations and
+complaints are the real ones. Nothing starts and no instrument moves.
+
+Given an assignment, the plan is also measured against its acceptance
+criteria using the facts it *would* produce. A coverage criterion
+(a span, a number of points) reported unmet here means this plan cannot
+satisfy it however well it runs — which is worth knowing now rather than
+in three hours. A criterion about an uncertainty cannot be predicted from
+a program and is expected to show unmet until there is data.
+
+Use it to get a plan approved, and to catch the plan that measures the
+wrong range before it measures it.
+"""),
+    _tool("report_finding", "report_finding", properties={
+        "claim": dict(_STR, description="What you concluded, in one "
+                                        "sentence."),
+        "assignment": dict(_STR, description="The assignment this answers."),
+        "value": dict(_NUM, description="The number, if the claim has one."),
+        "unit": _STR,
+        "uncertainty": dict(_NUM, description="Its uncertainty, in the "
+                                              "same unit."),
+        "runs": dict(_STRS, description="Journal run ids the claim rests "
+                                        "on. The facts that decide "
+                                        "acceptance are read from these."),
+        "assumptions": dict(_STRS, description="What you took for granted."),
+        "evidence": dict(_OBJ, description="Named numbers the journal "
+                                           "cannot know — a fitted value, "
+                                           "an uncertainty, an SNR."),
+    }, required=["claim"], description="""
+Record a conclusion and have it checked against the assignment.
+
+What decides acceptance is read out of the runs you cite — how many
+points they took, how far each parameter was swept, which channels were
+read — and not out of this call. 'evidence' is for what the journal
+cannot know, such as a fitted value or an uncertainty; a name the journal
+already establishes is refused rather than used, so a claim cannot talk
+its way past a criterion about coverage.
+
+accepted=true is the assignment's verdict, not yours. If it comes back
+false, the criteria say which evidence is missing, and the honest move is
+to take the missing data rather than to restate the claim.
+
+The finding lands in the journal either way, with its criteria, its runs
+and its assumptions, so a conclusion that was not accepted is still on
+the record.
+"""),
+
     # ---- knowing where you are ---------------------------------------
     _tool("describe_rig", "describe_rig", read_only=True, description="""
 Start here. Returns what this rig is: the lab profile (every instrument,

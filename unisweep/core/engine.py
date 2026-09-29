@@ -702,6 +702,52 @@ class SweepEngine(threading.Thread):
     STALL_WARN_S = 3.0
     STALL_ABORT_S = 12.0
 
+    #: units that mean this axis is a temperature
+    TEMPERATURE_UNITS = ("k", "mk", "uk", "µk", "kelvin",
+                         "°c", "degc", "celsius")
+
+    def _is_temperature(self, device: str, param: str) -> bool:
+        """Does this axis measure a temperature?
+
+        The lab profile decides, by the parameter's unit or quantity. The
+        name is the fallback, for a rig with no profile.
+        """
+        profile = getattr(self, "profile", None)
+        spec = None
+        if profile is not None:
+            try:
+                spec = profile.spec(device, param)
+            except Exception:                     # noqa: BLE001
+                spec = None
+        if spec is not None:
+            unit = str(getattr(spec, "unit", "") or "").strip().lower()
+            quantity = str(getattr(spec, "quantity", "") or "").lower()
+            if unit in self.TEMPERATURE_UNITS or "temperature" in quantity:
+                return True
+        return "temp" in str(param).lower()
+
+    def _stall_limits(self, device: str, param: str):
+        """How long a readback may stop moving before we complain, and
+        before the walk is abandoned. ``inf`` disables the watchdog.
+
+        The watchdog exists for an instrument that either travels or is
+        broken: a magnet whose field stops short of target is a fault, and
+        aborting the walk is the right answer. A temperature is not like
+        that. A controller with thermal mass closes on its setpoint
+        asymptotically, so the readback genuinely stops moving — inside any
+        noise margin we can afford — while still short of target. The
+        watchdog then aborts a perfectly good sweep, and a longer timeout
+        only postpones the same abort, which is why this is switched off
+        for temperature rather than lengthened.
+
+        The cost is real and accepted: a dead temperature controller now
+        waits instead of being reported. The step's own delay and the
+        operator are what catch that.
+        """
+        if self._is_temperature(device, param):
+            return float("inf"), float("inf")
+        return self.STALL_WARN_S, self.STALL_ABORT_S
+
     def _continuous_rate(self, ax, backward: bool, adapter,
                          param: str):
         rate = ax.back_rate if backward and ax.back_rate else ax.rate
@@ -780,6 +826,8 @@ class SweepEngine(threading.Thread):
         bad_s = 0.0                    # time with NaN / failing readback
         warned_bad = False
         dev_name = f"{self.live.axis(axis_i).device}.{param}"
+        warn_s, abort_s = self._stall_limits(
+            self.live.axis(axis_i).device, param)
         while True:
             self._gate()
             self._refresh_condition()
@@ -892,7 +940,7 @@ class SweepEngine(threading.Thread):
                 warned_stall = False
             else:
                 stalled_s += delay
-            if stalled_s >= self.STALL_WARN_S and not warned_stall:
+            if stalled_s >= warn_s and not warned_stall:
                 warned_stall = True
                 self._emit(SweepError(where="sweepable", crucial=True,
                                       message=(
@@ -907,7 +955,7 @@ class SweepEngine(threading.Thread):
                         f"{dev_name}: re-sending the setpoint failed "
                         f"({type(exc).__name__}: {exc}) — sweep stopped") \
                         from exc
-            if stalled_s >= self.STALL_ABORT_S:
+            if stalled_s >= abort_s:
                 self._emit(SweepError(where="sweepable", crucial=True,
                                       message=(
                     f"{dev_name} never reached {target:g} (stuck at {v:g} "
@@ -1042,8 +1090,9 @@ class SweepEngine(threading.Thread):
                         w["stalled"], w["warned"] = 0.0, False
                     else:
                         w["stalled"] += dt
-                    if w["stalled"] >= self.STALL_WARN_S \
-                            and not w["warned"]:
+                    warn_s, abort_s = self._stall_limits(ax.device,
+                                                         ax.parameter)
+                    if w["stalled"] >= warn_s and not w["warned"]:
                         w["warned"] = True
                         self._error("approach", RuntimeError(
                             f"{ax.device}.{ax.parameter} stuck at {v:g} "
@@ -1053,7 +1102,7 @@ class SweepEngine(threading.Thread):
                                         speed=w["rate"])
                         except Exception:       # noqa: BLE001
                             pass
-                    if w["stalled"] >= self.STALL_ABORT_S:
+                    if w["stalled"] >= abort_s:
                         self._emit(SweepError(where="approach",
                                               crucial=True, message=(
                             f"{ax.device}.{ax.parameter}: never reached "
@@ -1145,6 +1194,7 @@ class SweepEngine(threading.Thread):
             return
         travel = None
         stalled_s, prev_dist, warned = 0.0, None, False
+        warn_s, abort_s = self._stall_limits(ax.device, param)
         while True:
             self._gate()
             self._sleep(0.1)
@@ -1173,7 +1223,7 @@ class SweepEngine(threading.Thread):
                 stalled_s, warned = 0.0, False
             else:
                 stalled_s += 0.1
-            if stalled_s >= self.STALL_WARN_S and not warned:
+            if stalled_s >= warn_s and not warned:
                 warned = True
                 self._error("sweepable", RuntimeError(
                     f"{param} stuck at {v:g} while moving to {value:g} — "
@@ -1182,7 +1232,7 @@ class SweepEngine(threading.Thread):
                     adapter.set(param, float(value), speed=rate)
                 except Exception:                 # noqa: BLE001
                     pass
-            if stalled_s >= self.STALL_ABORT_S:
+            if stalled_s >= abort_s:
                 self._error("sweepable", RuntimeError(
                     f"{param} never settled at {value:g} — continuing with "
                     f"the instrument at {v:g}"))

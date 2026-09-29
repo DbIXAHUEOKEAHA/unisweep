@@ -32,6 +32,9 @@ from ..core.journal import Journal
 from ..core.labprofile import DerivedEvaluator, LabProfile
 from ..core.provenance import read_sidecar
 from ..core.limits import LimitPolicy, estimate_program, validate_program
+from .assignment import (AssignmentError, assignments_dir, facts_from_programs,
+                         facts_from_runs, list_assignments, load_assignment,
+                         merge_facts)
 from .bridge import TkBridge
 from .controls import ControlError, ControlRegistry, UnknownControl
 from .dialogs import intercept
@@ -559,6 +562,212 @@ class AgentSession:
                 f"no provenance sidecar beside '{path}' — either the file "
                 f"predates provenance recording, or the path is wrong")
         return record
+
+    # ================================================================
+    # the assignment
+    # ================================================================
+    def get_assignment(self, name: str = "") -> dict:
+        """The question this session exists to answer."""
+        core = self.app.core_dir
+        if not str(name).strip():
+            available = list_assignments(core)
+            return {"assignments": available,
+                    "directory": assignments_dir(core),
+                    "hint": "call get_assignment again with one of these "
+                            "names" if available else
+                            "no assignments have been written yet — ask "
+                            "your supervisor for one"}
+        try:
+            return load_assignment(core, name).to_dict()
+        except AssignmentError as exc:
+            raise SessionError(str(exc)) from None
+
+    def _assignment_or_none(self, name: str):
+        if not str(name or "").strip():
+            return None
+        try:
+            return load_assignment(self.app.core_dir, name)
+        except AssignmentError as exc:
+            raise SessionError(str(exc)) from None
+
+    def propose_plan(self, assignment: str = "",
+                     steps: Optional[Sequence[dict]] = None) -> dict:
+        """Price a whole plan before any of it runs.
+
+        Each step is ``{"purpose": ..., "program": {...}}`` and is put
+        through the same ``dry_run`` a single program gets, so the cost
+        and the pre-flight complaints are the real ones. The plan is then
+        measured against the assignment's acceptance criteria using the
+        facts it *would* produce — which is the only cheap moment to find
+        out that a plan was never going to answer the question.
+
+        Nothing is started and no instrument is touched.
+        """
+        steps = list(steps or ())
+        if not steps:
+            raise SessionError(
+                "a plan needs at least one step: "
+                "[{'purpose': 'why', 'program': {...}}]")
+        priced: list[dict] = []
+        for index, step in enumerate(steps, start=1):
+            if not isinstance(step, dict):
+                raise SessionError(f"step {index} is not an object")
+            quote = self.dry_run(step.get("program"))
+            priced.append({
+                "step": index,
+                "purpose": str(step.get("purpose") or "").strip(),
+                "ok": quote.get("ok", False),
+                "planned_points": quote.get("planned_points", 0),
+                "estimated_seconds": quote.get("estimated_seconds", 0),
+                "estimated_duration": quote.get("estimated_duration", ""),
+                "problems": quote.get("problems", []),
+                "reason": quote.get("reason", ""),
+                "program": quote.get("program", {}),
+            })
+
+        seconds = sum(float(p["estimated_seconds"] or 0) for p in priced)
+        out = {
+            "steps": priced,
+            "ok": all(p["ok"] for p in priced),
+            "total_points": sum(int(p["planned_points"] or 0) for p in priced),
+            "total_seconds": round(seconds, 1),
+            "total_duration": _duration(seconds),
+            "missing_purpose": [p["step"] for p in priced
+                                if not p["purpose"]],
+        }
+        task = self._assignment_or_none(assignment)
+        if task is not None:
+            predicted = facts_from_programs(priced)
+            checks = task.check(predicted)
+            out["assignment"] = task.name
+            out["would_satisfy"] = checks
+            out["predicted_facts"] = predicted
+            out["note"] = (
+                "Criteria shown as unmet here are not a fault in the plan "
+                "unless they are about coverage — an uncertainty cannot be "
+                "predicted from a program, only reported once the data "
+                "exists. Coverage ones (spans, points) not met mean this "
+                "plan cannot satisfy them however well it runs.")
+        return out
+
+    def report_finding(self, claim: str, assignment: str = "",
+                       value: Optional[float] = None, unit: str = "",
+                       uncertainty: Optional[float] = None,
+                       runs: Optional[Sequence[str]] = None,
+                       assumptions: Optional[Sequence[str]] = None,
+                       evidence: Optional[dict] = None) -> dict:
+        """A conclusion, checked against the assignment and written down.
+
+        ``runs`` are the journal run ids the claim rests on; the facts
+        that decide acceptance are read out of those runs rather than
+        taken from this call. ``evidence`` supplies only what the journal
+        cannot know — a fitted value, an uncertainty — and a name the
+        journal already establishes is refused rather than used.
+
+        Returns the per-criterion verdict. ``accepted`` is the
+        assignment's answer, not the assistant's.
+        """
+        claim = str(claim or "").strip()
+        if not claim:
+            raise SessionError("a finding needs a claim: what did you "
+                               "conclude, in one sentence?")
+        run_ids = [str(r).strip() for r in (runs or ()) if str(r).strip()]
+        found, unknown = [], []
+        for run_id in run_ids:
+            record = self.journal.run(run_id)
+            (found if record is not None else unknown).append(
+                record if record is not None else run_id)
+        if unknown:
+            raise SessionError(
+                "no run called " + ", ".join(f"'{u}'" for u in unknown)
+                + " in the journal — check journal_runs for the real ids")
+
+        measured = facts_from_runs(found)
+        reported = dict(evidence or {})
+        if value is not None:
+            reported.setdefault("value", value)
+        if uncertainty is not None:
+            reported.setdefault("uncertainty", uncertainty)
+        facts, refused = merge_facts(measured, reported)
+
+        task = self._assignment_or_none(assignment)
+        checks = task.check(facts) if task is not None else []
+        accepted = bool(task is not None and checks
+                        and all(c["met"] for c in checks))
+
+        text = self._finding_markdown(
+            claim, task, value, unit, uncertainty, run_ids,
+            list(assumptions or ()), checks, accepted)
+        written = self.journal.note(
+            text, run_id=run_ids[0] if run_ids else "", author="assistant")
+
+        out = {
+            "claim": claim,
+            "assignment": task.name if task is not None else "",
+            "accepted": accepted,
+            "criteria": checks,
+            "facts": facts,
+            "runs": run_ids,
+            "journalled": written,
+            "file": self.journal.markdown_path(),
+        }
+        if refused:
+            out["refused_evidence"] = refused
+        if task is None:
+            out["accepted_why"] = (
+                "no assignment named, so there is nothing to accept "
+                "against — the finding is recorded, not judged")
+        elif not checks:
+            out["accepted_why"] = (
+                f"'{task.name}' states no acceptance criteria, so nothing "
+                f"can confirm the work is finished")
+        elif not accepted:
+            out["accepted_why"] = "; ".join(
+                c.get("reason", "") for c in checks if not c["met"])
+        return out
+
+    @staticmethod
+    def _finding_markdown(claim, task, value, unit, uncertainty, runs,
+                          assumptions, checks, accepted) -> str:
+        lines = [f"**Finding** — {claim}"]
+        if value is not None:
+            measurement = f"{value:g}"
+            if uncertainty is not None:
+                measurement += f" ± {uncertainty:g}"
+            if unit:
+                measurement += f" {unit}"
+            lines.append(f"- value: {measurement}")
+        if task is not None:
+            lines.append(f"- assignment: {task.name} — "
+                         f"{'ACCEPTED' if accepted else 'not yet accepted'}")
+        if runs:
+            lines.append(f"- from runs: {', '.join(runs)}")
+        for assumption in assumptions:
+            lines.append(f"- assumes: {assumption}")
+        for check in checks:
+            mark = "met" if check["met"] else "NOT met"
+            tail = "" if check["met"] else f" — {check.get('reason', '')}"
+            lines.append(f"- `{check['test']}` {mark}{tail}")
+        return "\n".join(lines)
+
+
+def _duration(seconds: float) -> str:
+    seconds = max(int(seconds), 0)
+    hours, rest = divmod(seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours} h {minutes:02d} m"
+    if minutes:
+        return f"{minutes} m {secs:02d} s"
+    return f"{secs} s"
+
+
+def _daily_dir(core_dir: str) -> str:
+    from ..core.writer import daily_data_dir
+    try:
+        return daily_data_dir(core_dir)
+    except Exception:                              # noqa: BLE001
+        return os.path.join(core_dir, "<date>", "data_files")
 
 
 def _duration(seconds: float) -> str:

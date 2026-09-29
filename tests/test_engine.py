@@ -2627,3 +2627,54 @@ def test_the_saved_image_can_show_one_walk_out_of_n():
                                           first_walk_only=True)).copy()
     assert np.array_equal(one, again), "the same style twice, same pixels"
     assert open(table).read().count("21") == 1, "the table is untouched"
+
+
+# ---------------------------------------------------------------------------
+# the stall watchdog, and why temperature is exempt from it
+# ---------------------------------------------------------------------------
+from unisweep.core.labprofile import LabProfile, ParameterSpec  # noqa: E402
+
+
+def _bare_engine(profile=None):
+    """Only _stall_limits is under test, so skip the thread and the queue."""
+    engine = SweepEngine.__new__(SweepEngine)
+    engine.profile = profile if profile is not None else LabProfile.empty()
+    return engine
+
+
+def test_the_stall_watchdog_is_off_for_a_temperature_axis():
+    """A controller with thermal mass closes on its setpoint
+    asymptotically: the readback stops moving, inside any noise margin we
+    can afford, while still short of target. The watchdog would abort a
+    perfectly good sweep there, and a longer timeout only postpones the
+    same abort."""
+    engine = _bare_engine()
+    assert engine._stall_limits("LAKESHORE", "temperature") == (
+        float("inf"), float("inf"))
+
+
+def test_a_magnet_keeps_its_watchdog():
+    """It either travels or it is broken, and stopping short is a fault."""
+    engine = _bare_engine()
+    assert engine._stall_limits("AMI430", "field") == (
+        SweepEngine.STALL_WARN_S, SweepEngine.STALL_ABORT_S)
+
+
+def test_the_profile_decides_what_counts_as_a_temperature():
+    """By unit or by quantity, so an axis named 'T' or 'setpoint' is still
+    recognised. The parameter name is only the fallback for a rig with no
+    profile."""
+    by_unit = LabProfile.empty().with_parameter(
+        "CRYO", ParameterSpec(parameter="T", unit="K"))
+    assert _bare_engine(by_unit)._stall_limits("CRYO", "T")[1] == float("inf")
+
+    by_quantity = LabProfile.empty().with_parameter(
+        "CRYO", ParameterSpec(parameter="setpoint",
+                              quantity="sample temperature"))
+    assert _bare_engine(by_quantity)._stall_limits(
+        "CRYO", "setpoint")[1] == float("inf")
+
+    volts = LabProfile.empty().with_parameter(
+        "GATE", ParameterSpec(parameter="Volt", unit="V"))
+    assert _bare_engine(volts)._stall_limits(
+        "GATE", "Volt")[1] == SweepEngine.STALL_ABORT_S
