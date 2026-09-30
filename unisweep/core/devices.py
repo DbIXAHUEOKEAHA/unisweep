@@ -423,6 +423,33 @@ class DeviceRegistry:
         if address and address not in self.addresses:
             self.addresses.append(address)
 
+    def remove_address(self, address: str) -> bool:
+        """Take an address off the rig entirely.
+
+        ``unassign`` only clears *which driver answers* on an address — the
+        row stays, unassigned. This is the other half: the address leaves
+        the list and the saved dictionary, which is what you want when the
+        instrument is gone rather than merely unrecognised.
+
+        Any open session is closed first. ``Time`` is the virtual clock
+        every sweep can use as an axis and is refused. Returns whether
+        anything was removed.
+        """
+        if not address or address == "Time":
+            return False
+        known = address in self.addresses or address in self.types
+        if not known:
+            return False
+        self.types.pop(address, None)
+        with self._lock:
+            old = self._adapters.pop(address, None)
+        if old is not None:
+            old.close()
+        if address in self.addresses:
+            self.addresses.remove(address)
+        self.save_types()
+        return True
+
     def unassign(self, address: str) -> None:
         if address in self.types and address != "Time":
             del self.types[address]

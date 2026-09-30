@@ -112,8 +112,12 @@ class Card(ttk.Frame):
 class Collapsible(ttk.Frame):
     """A section that folds away (script editor, back-sweep settings...)."""
 
-    def __init__(self, master, title: str, opened=False):
+    def __init__(self, master, title: str, opened=False, on_toggle=None):
         super().__init__(master, style="Card.TFrame")
+        #: called with the new open state whenever the section is folded or
+        #: unfolded, for a section that means something rather than merely
+        #: taking up room — see the sweep page's return sweep.
+        self._on_toggle = on_toggle
         self._open = tk.BooleanVar(value=opened)
         self._btn = ttk.Checkbutton(
             self, text=title, variable=self._open, style="TCheckbutton",
@@ -128,6 +132,8 @@ class Collapsible(ttk.Frame):
             self.body.grid(row=1, column=0, sticky="nsew")
         else:
             self.body.grid_forget()
+        if self._on_toggle is not None:
+            self._on_toggle(bool(self._open.get()))
 
     def open(self):
         self._open.set(True)

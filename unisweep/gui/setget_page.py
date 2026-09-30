@@ -152,11 +152,34 @@ class SetGetPage(ttk.Frame):
 
     # -----------------------------------------------------------------
     def refresh_reads(self):
+        """Rebuild the monitored list without losing what is chosen.
+
+        Emptying the listbox drops its selection, so it has to be carried
+        over by NAME. Indices will not do: the catalogue gains and loses
+        channels as instruments connect, so a remembered index afterwards
+        points at a different channel.
+
+        Who calls this is the reason it matters. Pressing **Set** on a row
+        connects that instrument, the app reports that the devices changed,
+        and both read lists are rebuilt from here — which is how the
+        monitor selection used to disappear at the exact moment a value was
+        set. The row's own device and parameter are preserved for the same
+        reason.
+        """
+        selected = {self.reads_list.get(i)
+                    for i in self.reads_list.curselection()}
         self.reads_list.delete(0, "end")
         for name in self.registry.read_catalogue():
             self.reads_list.insert("end", name)
+            if name in selected:
+                self.reads_list.selection_set("end")
         for row in self.rows:
+            address, parameter = row.address(), row.parameter.get()
             row.device.configure(values=self.registry.display_list())
+            if address in self.registry.addresses:
+                row.device.set(self.registry.display_name(address))
+            if parameter:
+                row.parameter.set(parameter)
 
     def controls(self) -> list:
         """Named handles for the Set & Get page."""

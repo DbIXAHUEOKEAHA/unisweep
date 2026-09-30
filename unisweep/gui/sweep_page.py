@@ -101,11 +101,17 @@ class AxisCard(Card):
         ttk.Checkbutton(flags, text="Snake",
                         variable=self.snake).pack(side="left", padx=(10, 8))
         self.stepwise = tk.BooleanVar(value=False)
-        ttk.Checkbutton(flags, text="Force stepwise",
-                        variable=self.stepwise).pack(side="left")
+        self.stepwise_box = ttk.Checkbutton(flags, text="Force stepwise",
+                                            variable=self.stepwise)
+        self.stepwise_box.pack(side="left")
+        Tooltip(self.stepwise_box,
+                "Step a self-ramping instrument point by point instead of\n"
+                "letting it ramp and sampling as it goes. Only the fastest\n"
+                "axis can ramp, so only it has anything to force.")
 
         r += 1
-        back = Collapsible(self, "Return sweep (different rate / delay)")
+        back = Collapsible(self, "Return sweep (different rate / delay)",
+                           on_toggle=self._return_toggled)
         back.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(8, 0))
         ttk.Label(back.body, text="Back rate", style="Muted.TLabel").grid(
             row=0, column=0, sticky="w")
@@ -144,6 +150,52 @@ class AxisCard(Card):
     # -----------------------------------------------------------------
     def device_address(self) -> str:
         return self.page.registry.address_from_display(self.device.get())
+
+    def set_innermost(self, innermost: bool) -> None:
+        """Show 'Force stepwise' only on the fastest axis.
+
+        An outer axis is stepped point by point whatever this flag says:
+        the engine walks it to each value and *waits for it to arrive*
+        before the inner scan starts. All the flag did there was skip that
+        wait — which on a magnet means scanning while the field is still
+        ramping, and is never what anyone wants. So it is hidden, and an
+        outer axis now always ramps and waits.
+        """
+        if innermost:
+            self.stepwise_box.pack(side="left")
+        else:
+            self.stepwise.set(False)
+            self.stepwise_box.pack_forget()
+
+    def _return_toggled(self, opened: bool) -> None:
+        """Unfolding the return section means there and back, so say so.
+
+        The engine already inferred it — a back rate or delay implies two
+        walks through ``effective_walks()`` — but the Walks field still read
+        1, so the point count and the ETA on screen disagreed with the sweep
+        that would actually run.
+
+        Only 1 <-> 2 is touched: somebody who typed 5 walks meant 5. Folding
+        the section also clears the two fields, because a hidden value that
+        keeps the return pass alive is the same lie in the other direction.
+        """
+        walks_box = getattr(self, "walks", None)
+        if walks_box is None:
+            return                      # still being built
+        try:
+            walks = max(int(walks_box.get()), 1)
+        except (TypeError, ValueError):
+            walks = 1
+        if opened:
+            if walks == 1:
+                walks_box.set(2)
+        else:
+            if walks == 2:
+                walks_box.set(1)
+            for field in (getattr(self, "back_rate", None),
+                          getattr(self, "back_delay", None)):
+                if field is not None:
+                    field.set("")
 
     def _device_changed(self, _=None):
         opts = self.page.registry.set_options(self.device_address())
@@ -448,6 +500,9 @@ class SweepPage(ttk.Frame):
             card.grid_forget()
             if i < self.n_dims:
                 card.grid(row=i, column=0, sticky="ew", pady=4)
+            # only the innermost (fastest) axis can ramp continuously, so
+            # only it has anything to force into steps
+            card.set_innermost(i == self.n_dims - 1)
         # Switching dimension loads that dimension's preset, and a preset
         # REPLACES every field on the page. Re-picking the dimension that
         # is already showing must not: the fields would silently revert
@@ -510,16 +565,15 @@ class SweepPage(ttk.Frame):
     # ---------------- run control --------------------------------------
     @staticmethod
     def _estimate(program) -> tuple[int, float]:
-        """(planned points, rough duration in s) from the current program."""
-        points = 1
-        duration = 0.0
-        outer_product = 1
-        for ax in program.axes:
-            count = max(ax.planned_count(), 1) * ax.effective_walks()
-            points *= count
-            outer_product *= count
-            duration += outer_product * ax.point_delay()
-        return points, duration
+        """(planned points, rough duration in s) from the current program.
+
+        Delegated on purpose: the engine's progress total and the lab
+        profile's max_duration pre-flight call the same planner. Three
+        private copies of this arithmetic had drifted apart and all three
+        over-counted walks.
+        """
+        from ..core.config import plan_program
+        return plan_program(program.axes)
 
     def _start(self):
         program = self.build_program()

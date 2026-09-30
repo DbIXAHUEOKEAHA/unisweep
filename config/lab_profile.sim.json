@@ -2,7 +2,7 @@
   "version": 1,
   "lab": "electronic transport under THz excitation",
   "autonomy": "bounded",
-  "notes": "HOW TO READ THIS FILE.\n\nThe INSTRUMENT CLASSES section is the general knowledge and it is the part that matters. It describes the KINDS of hardware this lab uses, what each kind is for, what it can damage and how it is used properly. A specific box inherits the meaning of its class. A box this file has never heard of is placed by matching its driver's own option names against the class signatures \u2014 so buying a different lock-in next month changes nothing here.\n\nThe CONFIGURED INSTRUMENTS section is only whatever happens to be plugged in now. Do not reason from it about what the lab can do; reason from the classes.\n\nSAFETY PROCEDURE \u2014 READ BEFORE SETTING ANY GATE.\n\nThe per-parameter limits are a hardware envelope, not the working limits. The working limits are MEASURED at the start of every cooldown and they depend on the device, which this file cannot know.\n\n1. CONTACTS. Check every contact pair resistance before anything else.\n\n2. LEAK HUNT. Start at Vg = 0 with the sample cold. Measure Rxx and the gate current. The gate current will read a nanoamp or two at zero volts \u2014 that is the source-measure unit's own offset, not the device leaking. Sweep the gate outward, left to right, in slowly increasing ranges, watching the current. Past some voltage the leakage climbs exponentially OUT OF that offset floor. THE ONSET OF THAT CLIMB IS THE SAFE GATE LIMIT for the rest of the cooldown. Priors, not permissions: hBN never past 10 V unless there is a real reason; SiO2 around 60 V. The measured onset wins.\n\n3. BIAS LIMIT, COUPLED TO THE GATE. Bias the SAME SIGN as the gate: the out-of-plane field is compensated from both sides and the dielectric is not at risk, so what limits you is current \u2014 NEVER MORE THAN 500 uA THROUGH A 2D DEVICE, i.e. |V_bias| <= 500e-6 * R_2pt using the measured two-point resistance. Bias the OPPOSITE SIGN: the fields add and the dielectric IS at risk, so HALVE BOTH LIMITS. This rule is coupled and a static min/max cannot express it; it is left here as procedure and nothing enforces it. Check it before every bias change.\n\n4. WORK ETHIC. Check the simple slice before committing to a long map, then let it set the limits, resolution and time constant. About 100 points per axis is usually enough. Push the reference frequency up until the lock-in's Y component reaches about 10% of X, then stop.\n\n5. OPTICS. Calibrate the lens by scanning X and Y and taking THE POINT OF HIGHEST SYMMETRY OF THE PHOTORESPONSE MAP, WHICH IS NOT THE POINT OF HIGHEST SIGNAL. Focus Z first.\n\nThe full pipeline is in docs/TRANSPORT_THZ_PIPELINE.md. What the operator must supply per task: the dielectric and its thickness, whether there is a top gate, the expected Dirac point, and the safe gate limit this cooldown's leak hunt found.\n\nON CLASSIFYING AN UNKNOWN BOX. Every class lists the drivers in this lab that belong to it, and that binding is exact \u2014 use it first. The signatures are a FALLBACK for hardware this file has never seen: they match a driver's own option names and return the best candidates with scores. Measured against the 41 drivers in devices/ that declare literal option lists, the top candidate is right 35 times. The six it does not get outright are instructive rather than random: an integrated cryostat genuinely IS both a temperature controller and a magnet supply, and a positioner that both steps and reports position is genuinely both kinds \u2014 in each case the right class is in the top two. Three more (heliox_mercuryITC, sim900, tested_pibit) expose too few or too bespoke option names to be placed at all, and returning nothing is the correct answer there. TREAT A CLASSIFICATION AS A HYPOTHESIS: if the scores are close or empty, read the driver's option lists and say what you concluded, rather than proceeding on a guess.",
+  "notes": "HOW TO READ THIS FILE.\n\nThe INSTRUMENT CLASSES section is the general knowledge and it is the part that matters. It describes the KINDS of hardware this lab uses, what each kind is for, what it can damage and how it is used properly. A specific box inherits the meaning of its class. A box this file has never heard of is placed by matching its driver's own option names against the class signatures — so buying a different lock-in next month changes nothing here.\n\nThe CONFIGURED INSTRUMENTS section is only whatever happens to be plugged in now. Do not reason from it about what the lab can do; reason from the classes.\n\nSAFETY PROCEDURE — READ BEFORE SETTING ANY GATE.\n\nThe per-parameter limits are a hardware envelope, not the working limits. The working limits are MEASURED at the start of every cooldown and they depend on the device, which this file cannot know.\n\n1. CONTACTS. Check every contact pair resistance before anything else.\n\n2. LEAK HUNT. Start at Vg = 0 with the sample cold. Measure Rxx and the gate current. The gate current will read a nanoamp or two at zero volts — that is the source-measure unit's own offset, not the device leaking. Sweep the gate outward, left to right, in slowly increasing ranges, watching the current. Past some voltage the leakage climbs exponentially OUT OF that offset floor. THE ONSET OF THAT CLIMB IS THE SAFE GATE LIMIT for the rest of the cooldown. Priors, not permissions: hBN never past 10 V unless there is a real reason; SiO2 around 60 V. The measured onset wins.\n\n3. BIAS LIMIT, COUPLED TO THE GATE. Bias the SAME SIGN as the gate: the out-of-plane field is compensated from both sides and the dielectric is not at risk, so what limits you is current — NEVER MORE THAN 500 uA THROUGH A 2D DEVICE, i.e. |V_bias| <= 500e-6 * R_2pt using the measured two-point resistance. Bias the OPPOSITE SIGN: the fields add and the dielectric IS at risk, so HALVE BOTH LIMITS. This rule is coupled and a static min/max cannot express it; it is left here as procedure and nothing enforces it. Check it before every bias change.\n\n4. WORK ETHIC. Check the simple slice before committing to a long map, then let it set the limits, resolution and time constant. About 100 points per axis is usually enough. Push the reference frequency up until the lock-in's Y component reaches about 10% of X, then stop.\n\n5. OPTICS. Calibrate the lens by scanning X and Y and taking THE POINT OF HIGHEST SYMMETRY OF THE PHOTORESPONSE MAP, WHICH IS NOT THE POINT OF HIGHEST SIGNAL. Focus Z first.\n\nThe full pipeline is in docs/TRANSPORT_THZ_PIPELINE.md. What the operator must supply per task: the dielectric and its thickness, whether there is a top gate, the expected Dirac point, and the safe gate limit this cooldown's leak hunt found.\n\nON CLASSIFYING AN UNKNOWN BOX. Every class lists the drivers in this lab that belong to it, and that binding is exact — use it first. The signatures are a FALLBACK for hardware this file has never seen: they match a driver's own option names and return the best candidates with scores. Measured against the 41 drivers in devices/ that declare literal option lists, the top candidate is right 35 times. The six it does not get outright are instructive rather than random: an integrated cryostat genuinely IS both a temperature controller and a magnet supply, and a positioner that both steps and reports position is genuinely both kinds — in each case the right class is in the top two. Three more (heliox_mercuryITC, sim900, tested_pibit) expose too few or too bespoke option names to be placed at all, and returning nothing is the correct answer there. TREAT A CLASSIFICATION AS A HYPOTHESIS: if the scores are close or empty, read the driver's option lists and say what you concluded, rather than proceeding on a guess.",
   "instrument_classes": {
     "lock_in": {
       "what": "Phase-sensitive detector. Drives the sample at a reference frequency and reports only the component of the response at that frequency, which is how a nanovolt signal is pulled out of microvolt noise.",
@@ -25,7 +25,7 @@
         "SimLockinXY"
       ],
       "safety": "The excitation current is not free. At base temperature it heats the electrons: a microamp lifts them several kelvin on a small 2D device. Choose the smallest amplitude that gives usable signal-to-noise, not the largest the input range allows.",
-      "method": "Allow at least 5 time constants of settling per point or the curve lags, direction-dependently and silently. Noise falls as sqrt(1/4 tau) until 1/f drift takes over near a second, past which a longer time constant buys nothing. Push the frequency up until Y reaches about 10% of X and stop there: beyond that the sample or the wiring is reactive and X is no longer just a resistance. Y is a diagnostic, not a nuisance \u2014 read it every run.",
+      "method": "Allow at least 5 time constants of settling per point or the curve lags, direction-dependently and silently. Noise falls as sqrt(1/4 tau) until 1/f drift takes over near a second, past which a longer time constant buys nothing. Push the frequency up until Y reaches about 10% of X and stop there: beyond that the sample or the wiring is reactive and X is no longer just a resistance. Y is a diagnostic, not a nuisance — read it every run.",
       "notes": "Where several lock-ins share one excitation, only the unit whose oscillator drives the current matters; the others' amplitude settings do nothing. Check which before assuming."
     },
     "source_measure_unit": {
@@ -49,7 +49,7 @@
         "SimSMU"
       ],
       "safety": "This is the class that destroys samples. On a gate it can punch through the dielectric, permanently. On a bias line it can burn the channel. ALWAYS set a compliance before enabling output, and keep to the leak-hunt limit and the coupled bias rule in the notes above. A compliance is a fuse, not a limit you are meant to reach.",
-      "method": "It does not read zero current at zero volts: expect a nanoamp-scale offset that is the instrument, not the device. Approach every new limit in increasing ranges, watching the measured current. Step gates rather than ramping them fast \u2014 max_step exists for that. A two-probe reading includes the contacts; the difference from a four-probe measurement IS the contact resistance.",
+      "method": "It does not read zero current at zero volts: expect a nanoamp-scale offset that is the instrument, not the device. Approach every new limit in increasing ranges, watching the measured current. Step gates rather than ramping them fast — max_step exists for that. A two-probe reading includes the contacts; the difference from a four-probe measurement IS the contact resistance.",
       "notes": "Sourcing current and sourcing voltage are different experiments on a nonlinear device. Say which you did."
     },
     "dc_voltage_source": {
@@ -104,7 +104,7 @@
         "keithley2182"
       ],
       "safety": "Harmless to the sample. Its own input impedance is not infinite, which matters on a high-impedance device near charge neutrality.",
-      "method": "Longer integration (more NPLC) buys resolution and costs time; an integer number of power line cycles rejects mains hum. A nanovoltmeter needs thermal EMFs managed \u2014 let the connections settle before trusting sub-microvolt readings.",
+      "method": "Longer integration (more NPLC) buys resolution and costs time; an integer number of power line cycles rejects mains hum. A nanovoltmeter needs thermal EMFs managed — let the connections settle before trusting sub-microvolt readings.",
       "notes": "Four-wire excludes lead resistance; two-wire does not."
     },
     "temperature_controller": {
@@ -127,7 +127,7 @@
         "bluefors"
       ],
       "safety": "Heater range is the thing that damages a cryostat: a high range at low temperature boils off helium or warms a dilution unit past recovery. Raise ranges deliberately, never as a way to get somewhere faster.",
-      "method": "THE SAMPLE LAGS THE SETPOINT, typically by tens of seconds and much longer at the cold end. Reading the temperature straight after setting it returns the old value; wait for the sensor, not the setpoint. Several sensors report different places \u2014 know which one is actually on the sample before you put a number in a paper. For a base-to-300 K map use uneven steps spread out at the high end: the structure is at the cold end and the warm end only needs covering.",
+      "method": "THE SAMPLE LAGS THE SETPOINT, typically by tens of seconds and much longer at the cold end. Reading the temperature straight after setting it returns the old value; wait for the sensor, not the setpoint. Several sensors report different places — know which one is actually on the sample before you put a number in a paper. For a base-to-300 K map use uneven steps spread out at the high end: the structure is at the cold end and the warm end only needs covering.",
       "notes": "None of these measure the ELECTRON temperature. Once current flows or light is on, the electrons are somewhere else, and only a measurement can tell you where."
     },
     "magnet_supply": {
@@ -147,7 +147,7 @@
         "SimMagnet"
       ],
       "safety": "Exceeding the rated field or ramping too fast quenches the magnet. Ramp rate limits are not advisory. Leave a sweep with the field parked somewhere safe, not at maximum.",
-      "method": "A commanded field is not a reached field: the readback reports where the magnet has got to, and the command returns immediately. A field sweep is usually continuous rather than stepped \u2014 the engine ramps and samples on the delay timer, so point spacing is rate times delay. Sweeping faster than the lock-in time constant allows lags the reading and the magnet will not tell you. Symmetrise in field to separate the odd (Hall) part from the even (longitudinal) part: probe misalignment puts a slice of Rxx into Rxy and nothing else removes it.",
+      "method": "A commanded field is not a reached field: the readback reports where the magnet has got to, and the command returns immediately. A field sweep is usually continuous rather than stepped — the engine ramps and samples on the delay timer, so point spacing is rate times delay. Sweeping faster than the lock-in time constant allows lags the reading and the magnet will not tell you. Symmetrise in field to separate the odd (Hall) part from the even (longitudinal) part: probe misalignment puts a slice of Rxx into Rxy and nothing else removes it.",
       "notes": "Vector magnets add more than one axis, and their limits are usually lower off the main axis."
     },
     "cryostat": {
@@ -168,8 +168,8 @@
         "AttoDry2100_vector",
         "ADry2100"
       ],
-      "safety": "Everything in the temperature_controller and magnet_supply classes applies. Additionally: NEVER RAMP TEMPERATURE AND FIELD AT THE SAME TIME unless the system explicitly supports it \u2014 the heat load during a field ramp changes the thermometry, and the interlocks in this profile forbid it.",
-      "method": "Field is quoted in different units by different systems \u2014 oersted on some, tesla on others. Check the driver's own units before converting. 'Approach mode' changes whether the system overshoots a setpoint; for a slow sweep it matters.",
+      "safety": "Everything in the temperature_controller and magnet_supply classes applies. Additionally: NEVER RAMP TEMPERATURE AND FIELD AT THE SAME TIME unless the system explicitly supports it — the heat load during a field ramp changes the thermometry, and the interlocks in this profile forbid it.",
+      "method": "Field is quoted in different units by different systems — oersted on some, tesla on others. Check the driver's own units before converting. 'Approach mode' changes whether the system overshoots a setpoint; for a slow sweep it matters.",
       "notes": "Vector systems let the field angle be swept, which is its own kind of experiment and not a substitute for rotating the sample."
     },
     "positioner_closed_loop": {
@@ -192,7 +192,7 @@
       ],
       "safety": "Travel limits are real; driving into an end stop can damage the mechanism or the sample. Know the mount geometry before commanding a large move.",
       "method": "Backlash is real: approach a position from the same direction every time when repeatability matters. For an optical alignment scan, raster one axis fast and the other slow, and keep the fast axis unidirectional if backlash is visible in the map.",
-      "notes": "Position units differ between controllers \u2014 millimetres, microns, motor steps. Confirm from the driver rather than assuming."
+      "notes": "Position units differ between controllers — millimetres, microns, motor steps. Confirm from the driver rather than assuming."
     },
     "positioner_open_loop": {
       "what": "A stick-slip or piezo stepper. Moves by counting steps, not by going to a coordinate. Many have a position sensor, but stepping itself is relative and the step size depends on voltage, frequency and temperature.",
@@ -216,7 +216,7 @@
       "notes": "A scanner axis (continuous piezo range) and a stepper axis on the same controller are different things with different units; do not confuse them."
     },
     "shutter": {
-      "what": "A binary actuator \u2014 open or closed. Blocks or passes a beam.",
+      "what": "A binary actuator — open or closed. Blocks or passes a beam.",
       "sets": "open, close",
       "reads": "state, where there is a sensor",
       "signature": [
@@ -268,11 +268,11 @@
         "NI_DAQ"
       ],
       "safety": "Input range matters: over-range clips silently on some hardware and the average of a clipped signal looks like a perfectly good number.",
-      "method": "A channel that returns an ARRAY rather than a number is a vector read \u2014 Unisweep detects that by shape and promotes it to an axis of its own, so a 1-D sweep of an array channel becomes a map. Use the mean channels for sweeping and the array channels when the waveform itself is the measurement. Choose rate and sample count together: they set both the noise bandwidth and the time per point.",
+      "method": "A channel that returns an ARRAY rather than a number is a vector read — Unisweep detects that by shape and promotes it to an axis of its own, so a 1-D sweep of an array channel becomes a map. Use the mean channels for sweeping and the array channels when the waveform itself is the measurement. Choose rate and sample count together: they set both the noise bandwidth and the time per point.",
       "notes": ""
     },
     "spectrometer": {
-      "what": "Disperses light and returns a whole spectrum per acquisition \u2014 intensity against wavelength.",
+      "what": "Disperses light and returns a whole spectrum per acquisition — intensity against wavelength.",
       "sets": "integration time, number of averages",
       "reads": "wavelength axis, spectrum, dark spectrum, pixel count",
       "signature": [
@@ -303,8 +303,8 @@
         "terascan",
         "SimTHzSource"
       ],
-      "safety": "Eye and skin hazard at optical wavelengths; interlocks and enclosure rules apply and are not negotiable. On the sample, absorbed power heats the electrons and at high power can damage a device \u2014 approach a new power level in steps and watch the resistance.",
-      "method": "WHAT A GIVEN SOURCE EXPOSES IS NOT UNIVERSAL: some give a power level, some only an attenuator, some are fixed-frequency with nothing but a shutter. Read the driver's own set_options and get_options and work from that list rather than from any assumption about the class. A power monitor reads what LEAVES THE SOURCE, never what the sample absorbs \u2014 absorbed power is not measurable and has to be inferred by comparing the photoresponse against the response to a known DC Joule power. Tuning frequency usually changes power too; record both.",
+      "safety": "Eye and skin hazard at optical wavelengths; interlocks and enclosure rules apply and are not negotiable. On the sample, absorbed power heats the electrons and at high power can damage a device — approach a new power level in steps and watch the resistance.",
+      "method": "WHAT A GIVEN SOURCE EXPOSES IS NOT UNIVERSAL: some give a power level, some only an attenuator, some are fixed-frequency with nothing but a shutter. Read the driver's own set_options and get_options and work from that list rather than from any assumption about the class. A power monitor reads what LEAVES THE SOURCE, never what the sample absorbs — absorbed power is not measurable and has to be inferred by comparing the photoresponse against the response to a known DC Joule power. Tuning frequency usually changes power too; record both.",
       "notes": "Mode hops and settling after a tuning step are real; allow time and check the monitor before measuring."
     },
     "oscilloscope": {
@@ -340,7 +340,7 @@
         "Vna"
       ],
       "safety": "Output power reaches the sample. At low temperature a few dBm is a great deal of heating; start far below what seems reasonable.",
-      "method": "Calibrate before trusting absolute magnitude or phase, and recalibrate after changing the cabling or the temperature. A trace is a vector read and is promoted to an axis, so sweeping a gate against S21 gives a map directly. Beware of routines that abbreviate long arrays when printing \u2014 a truncated frequency list has silently corrupted data here before.",
+      "method": "Calibrate before trusting absolute magnitude or phase, and recalibrate after changing the cabling or the temperature. A trace is a vector read and is promoted to an axis, so sweeping a gate against S21 gives a map directly. Beware of routines that abbreviate long arrays when printing — a truncated frequency list has silently corrupted data here before.",
       "notes": ""
     },
     "spectrum_analyser": {
@@ -356,11 +356,11 @@
       ],
       "drivers": [],
       "safety": "Receive-only. Check the maximum input level before connecting to an amplified line.",
-      "method": "Resolution bandwidth sets both the noise floor and the sweep time; narrowing it by ten costs ten times the time. For noise measurements the result is a density and depends on the bandwidth \u2014 divide it out before comparing runs.",
+      "method": "Resolution bandwidth sets both the noise floor and the sweep time; narrowing it by ten costs ten times the time. For noise measurements the result is a density and depends on the bandwidth — divide it out before comparing runs.",
       "notes": "Present in the lab under rohdeschwarz/; no Unisweep driver is wired up yet."
     },
     "virtual": {
-      "what": "Not hardware. A pseudo-device that lets a sweep have an axis when no instrument should move \u2014 wall-clock time, a counter, a random channel for testing.",
+      "what": "Not hardware. A pseudo-device that lets a sweep have an axis when no instrument should move — wall-clock time, a counter, a random channel for testing.",
       "sets": "time",
       "reads": "elapsed time, random values",
       "signature": [
@@ -380,7 +380,7 @@
     "id": "SIM-GR-01",
     "material": "monolayer graphene on 300 nm SiO2 / degenerately doped Si back gate; antenna-coupled for sub-THz",
     "geometry": "Hall bar, W = 2 um, Vxx probe separation L = 6 um, so 3 squares between the longitudinal probes",
-    "contacts": "current-biased source-drain through a 1 Mohm series resistor; Vxx on the longitudinal pair, Vxy on the transverse pair. The Hall probes are misaligned by about 2.5% of a square, so Rxy carries a slice of Rxx \u2014 symmetrise in field to remove it.",
+    "contacts": "current-biased source-drain through a 1 Mohm series resistor; Vxx on the longitudinal pair, Vxy on the transverse pair. The Hall probes are misaligned by about 2.5% of a square, so Rxy carries a slice of Rxx — symmetrise in field to remove it.",
     "operator_must_supply": "dielectric and thickness, whether there is a top gate, the expected Dirac point, and the measured safe gate limit from this cooldown's leak hunt. None of it can be derived from the instruments."
   },
   "constants": {
@@ -579,7 +579,7 @@
       "class": "lock_in",
       "driver": "SimLockinXY",
       "role": "transverse (Hall) voltage across the Vxy probe pair",
-      "notes": "Slave to the XX oscillator: its amplitude setting does nothing. Carries about 2.5% of Rxx from probe misalignment \u2014 even in B, so [Rxy(+B)-Rxy(-B)]/2 removes it and nothing else does.",
+      "notes": "Slave to the XX oscillator: its amplitude setting does nothing. Carries about 2.5% of Rxx from probe misalignment — even in B, so [Rxy(+B)-Rxy(-B)]/2 removes it and nothing else does.",
       "parameters": {
         "x": {
           "alias": "Vxy",
@@ -752,7 +752,7 @@
     "Rxy": {
       "expression": "Vxy / I_ac",
       "unit": "ohm",
-      "quantity": "Hall resistance \u2014 NOT symmetrised; subtract the even-in-B part before extracting anything"
+      "quantity": "Hall resistance — NOT symmetrised; subtract the even-in-B part before extracting anything"
     },
     "rho_xx": {
       "expression": "Vxx / I_ac / aspect_ratio_squares",
@@ -777,7 +777,7 @@
   },
   "interlocks": {
     "max_points": 500000,
-    "max_duration_s": 172800,
+    "max_duration_s": 1728000,
     "exclusive_ramps": [
       [
         "B",

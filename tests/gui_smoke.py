@@ -273,6 +273,28 @@ def main():
         c.start.set(0); c.stop.set(1)
         c.rate.set(0.5); c.delay.set(0.005)
         c.mode.current(1)
+    pump(0.05)
+
+    # 'Force stepwise' belongs to the fastest axis alone: an outer axis is
+    # stepped and waited for whatever the flag says, so offering it there
+    # only invited scanning a row while the field was still ramping.
+    assert cards[1].stepwise_box.winfo_ismapped(), \
+        "the fastest axis should offer Force stepwise"
+    assert not cards[0].stepwise_box.winfo_ismapped(), \
+        "an outer axis should not offer Force stepwise"
+
+    # Unfolding the return section means there and back, and the Walks
+    # field has to say so — the engine inferred it, the screen did not.
+    cards[1].walks.set(1)
+    cards[1]._return_toggled(True)
+    assert int(cards[1].walks.get()) == 2, "unfolding did not imply 2 walks"
+    cards[1]._return_toggled(False)
+    assert int(cards[1].walks.get()) == 1, "folding did not undo it"
+    cards[1].walks.set(5)
+    cards[1]._return_toggled(True)
+    assert int(cards[1].walks.get()) == 5, "5 walks means 5, leave it alone"
+    cards[1].walks.set(1)
+
     page.refresh_reads()
     for i in range(page.reads_list.size()):
         if page.reads_list.get(i) == "LOCKIN.Curr":
@@ -399,6 +421,16 @@ def lifecycle_check():
     for i in range(sg.reads_list.size()):
         if sg.reads_list.get(i) in ("D1.Volt", "D2.Curr"):
             sg.reads_list.selection_set(i)
+    chosen = {sg.reads_list.get(i) for i in sg.reads_list.curselection()}
+    assert chosen, "nothing was selected to monitor"
+    # Pressing Set connects an instrument, the app reports that devices
+    # changed, and both read lists are rebuilt. The selection must survive.
+    app.on_devices_changed()
+    kept = {sg.reads_list.get(i) for i in sg.reads_list.curselection()}
+    assert kept == chosen, (
+        f"the Set & Get selection was lost when the lists were rebuilt: "
+        f"{sorted(chosen)} -> {sorted(kept)}")
+
     sg.delay.set("0.05")
     sg._start()
     pump(0.4)

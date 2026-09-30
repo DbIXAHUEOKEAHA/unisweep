@@ -267,15 +267,13 @@ class SweepEngine(threading.Thread):
                 for i in range(self.dims)}
 
     def _planned_total(self) -> int:
+        """Progress denominator — the same count the ETA and the profile's
+        max_duration pre-flight use, from one shared planner."""
+        from .config import plan_program
         prog = self.live.get()
-        total = 1
         solved = self._condition.coupled.solved - 1 \
             if self._condition.coupled else None
-        for i, ax in enumerate(prog.axes):
-            if i == solved:
-                continue
-            total *= max(ax.planned_count(), 1) * ax.effective_walks()
-        return total
+        return plan_program(prog.axes, solved)[0]
 
     # ---------------- pause / stop / to-zero gate ----------------------
     def _gate(self) -> None:

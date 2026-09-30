@@ -384,11 +384,16 @@ def test_preflight_forbids_sweeping_an_exclusive_pair_together():
 
 
 def test_estimate_counts_walks_and_dimensions():
+    """This test used to assert 3 * 3 * 2 and was wrong, which is how the
+    ETA stayed wrong: the inner axis walks there and back over 3 points,
+    and the turning point is set and measured ONCE, so a pass-set is 5
+    points and not 6. Verified against the engine in tests/test_estimate.py.
+    """
     program = SweepProgram(axes=(
         gate_axis(start=0.0, stop=1.0, rate=0.5, delay=0.1),
         gate_axis(start=0.0, stop=1.0, rate=0.5, delay=0.1, walks=2)))
     points, seconds = estimate_program(program)
-    assert points == 3 * 3 * 2
+    assert points == 3 * 5
     assert seconds > 0
 
 

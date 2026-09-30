@@ -22,7 +22,7 @@ from __future__ import annotations
 import queue
 import threading
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 
 from ..core.catalog import DriverCatalog
 from ..core.devices import probe_sweepable
@@ -66,6 +66,13 @@ class DeviceRow:
                                 anchor="w")
         self.status.grid(row=row, column=6, sticky="ew", padx=(8, 4))
         parent.columnconfigure(6, weight=1)
+        self.remove_btn = ttk.Button(parent, text="\u2715", width=3,
+                                     command=self._remove)
+        self.remove_btn.grid(row=row, column=7, padx=(2, 4))
+        Tooltip(self.remove_btn,
+                "Take this address off the rig.\n"
+                "The driver file stays installed and the catalog is\n"
+                "untouched — only this address goes.")
         Tooltip(self.install_btn,
                 "Fetch the driver file and pip-install its Python\n"
                 "dependencies into this environment.")
@@ -85,6 +92,7 @@ class DeviceRow:
             self.combo.configure(state="disabled")
             self.install_btn.grid_remove()
             self.test_btn.grid_remove()
+            self.remove_btn.grid_remove()
             self.led.set(PALETTE["accent"])
             self.status.configure(text="built-in")
             return
@@ -153,6 +161,11 @@ class DeviceRow:
                        label=f"{addr} · Sweep-capability test",
                        help="MOVES THE INSTRUMENT: opens a dialog that "
                             "asks for an explicit target."),
+            ctl.action(f"{p}.remove", self.remove_btn, page=page,
+                       label=f"{addr} · Remove address",
+                       help="Take this address off the rig. Asks for "
+                            "confirmation; the driver file and the catalog "
+                            "are untouched."),
         ]
 
     @staticmethod
@@ -180,6 +193,27 @@ class DeviceRow:
                               f"installed yet — press Install on the row")
         self.refresh()
         self.page.app.on_devices_changed()
+
+    def _remove(self):
+        """Take the address off the rig, once the person confirms.
+
+        Unassigning only clears which driver answers here; this removes the
+        address itself, which is what you want when the instrument is gone
+        rather than merely unrecognised. Any sweep axis or monitor entry
+        pointing at it is left to the pages to notice, which is why the app
+        is told the devices changed.
+        """
+        if self.address == "Time":
+            return
+        if not messagebox.askyesno(
+                "Remove address",
+                f"Take {self.address} off the list of instruments?\n\n"
+                f"The driver file stays installed; only this address goes."):
+            return
+        if self.page.registry.remove_address(self.address):
+            self.page.log(f"{self.address} removed from the rig")
+            self.page.rebuild_rows()
+            self.page.app.on_devices_changed()
 
     def _install(self):
         assigned = self.page.registry.types.get(self.address, "")
@@ -271,7 +305,7 @@ class DevicesPage(ttk.Frame):
         for col, (text, w) in enumerate((("", 3), ("Address", 26),
                                          ("Instrument driver", 40),
                                          ("", 8), ("", 6), ("", 3),
-                                         ("Status", 12))):
+                                         ("Status", 12), ("", 3))):
             ttk.Label(head, text=text, style="Muted.TLabel",
                       width=w).grid(row=0, column=col, sticky="w",
                                     padx=(2 if col == 0 else 0, 6))

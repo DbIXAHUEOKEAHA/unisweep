@@ -333,6 +333,21 @@ class DriverCatalog:
                        "drivers": self.repo_drivers,
                        "packages": sorted(self.repo_packages)}, fh, indent=2)
 
+    def _rebuild_entries(self) -> None:
+        """Rebuild the merged view from its sources, in constructor order.
+
+        Pruning in place would mean guessing which source an entry came
+        from; rebuilding cannot guess wrong. It is what lets a driver that
+        has DISAPPEARED from the repository disappear from the catalog,
+        while one that is built in, listed in driver_catalog.json, or
+        present as a local file stays — each of those re-adds itself here.
+        """
+        self.entries = {k: DriverEntry(**asdict(v))
+                        for k, v in BUILTIN_CATALOG.items()}
+        self._load_user_catalog()
+        self._merge_repo_drivers(save=False)
+        self._absorb_local_files()
+
     def _merge_repo_drivers(self, save: bool = True) -> list[str]:
         added = []
         for name, url in self.repo_drivers.items():
@@ -383,13 +398,30 @@ class DriverCatalog:
                 except Exception as zip_exc:      # noqa: BLE001
                     return [], ("offline — using local catalog "
                                 f"({zip_exc})"), False
-            self.repo_drivers.update(drivers)
-            self.repo_packages |= packages
-            added = self._merge_repo_drivers()
+            if not drivers:
+                # An empty listing is far more likely to be a broken
+                # response than a repository with no drivers in it, and
+                # acting on it would delete the whole catalog.
+                return [], ("repository listing came back empty — "
+                            "keeping the cached catalog"), False
+            # REPLACE rather than merge. Updating a dict and unioning a set
+            # can only ever grow them, so a driver deleted upstream stayed
+            # in repo_index.json for good and kept being offered on the
+            # Devices page long after it had ceased to exist.
+            previous = set(self.repo_drivers)
+            self.repo_drivers = dict(drivers)
+            self.repo_packages = set(packages)
+            self._rebuild_entries()
+            self._save_repo_index()
+            added = sorted(set(drivers) - previous)
+            dropped = sorted(n for n in previous - set(drivers)
+                             if n not in self.entries)
             msg = (f"catalog updated from {source}: "
                    f"{len(drivers)} drivers in repo"
-                   + (f", {len(added)} new: " + ", ".join(sorted(added))
-                      if added else ", no new ones"))
+                   + (f", {len(added)} new: " + ", ".join(added)
+                      if added else ", no new ones")
+                   + (f"; {len(dropped)} no longer in the repository: "
+                      + ", ".join(dropped) if dropped else ""))
             log(msg)
             return added, msg, True
 

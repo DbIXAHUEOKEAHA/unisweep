@@ -174,10 +174,11 @@ class LimitPolicy:
 def estimate_program(program) -> tuple[int, float]:
     """(points, seconds) a program is expected to take.
 
-    Same accounting the engine's ETA uses: the product of the per-axis
-    planned counts and walk counts, with the coupled-equality axis (if the
-    condition defines one) removed because it is solved rather than looped.
+    The arithmetic lives in :func:`unisweep.core.config.plan_program`, which
+    the engine's progress total and the sweep page's estimate also use — the
+    three used to carry separate copies of it and disagree.
     """
+    from .config import plan_program
     solved = None
     try:
         from .condition import ConditionSet
@@ -186,23 +187,7 @@ def estimate_program(program) -> tuple[int, float]:
             solved = cond.coupled.solved - 1
     except Exception:                              # noqa: BLE001
         solved = None
-    total = 1
-    seconds = 0.0
-    counts: list[int] = []
-    for i, axis in enumerate(program.axes):
-        if i == solved:
-            counts.append(1)
-            continue
-        n = max(axis.planned_count(), 1) * axis.effective_walks()
-        counts.append(n)
-        total *= n
-    # dwell is dominated by the innermost axis; outer axes add their own
-    for i, axis in enumerate(program.axes):
-        outer = 1
-        for j in range(i):
-            outer *= counts[j]
-        seconds += outer * counts[i] * axis.point_delay(False)
-    return total, seconds
+    return plan_program(program.axes, solved)
 
 
 def validate_program(program, profile: Optional[LabProfile] = None,

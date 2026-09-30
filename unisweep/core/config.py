@@ -82,8 +82,13 @@ class AxisProgram:
             return 2
         return w
 
-    def planned_count(self) -> int:
-        """Number of points in one forward walk (drives the ETA).
+    def planned_count(self, backward: bool = False) -> int:
+        """Number of points in one walk in the given direction.
+
+        The direction matters: ``back_rate`` — or ``back_delay`` in rate
+        mode — changes the step size, so a return walk can have a different
+        number of points from the forward one. Reusing the forward count
+        for every walk is one of the three things that made the ETA wrong.
 
         The walk takes ``floor(span/step)`` whole steps plus the start, and
         one more only when a partial step is left over — the runner clamps
@@ -94,7 +99,7 @@ class AxisProgram:
         """
         if self.manual_points is not None:
             return max(len(self.manual_points), 1)
-        step = self.step_size(False)
+        step = self.step_size(backward)
         if step <= 0 or not math.isfinite(step):
             return 1
         span = abs(self.stop - self.start)
@@ -102,6 +107,78 @@ class AxisProgram:
         whole = math.floor(steps + 1e-9)
         leftover = steps - whole
         return int(whole) + 1 + (1 if leftover > 1e-9 else 0)
+
+
+def plan_axis(axis: "AxisProgram", walks: int = 1):
+    """``(points, measured seconds, cost of flying it back)`` for one axis.
+
+    ``walks`` is 1 for every axis but the innermost looping one: the engine
+    makes exactly one measured pass on an outer axis and walks it back as
+    repositioning, never as measurement.
+    """
+    points, seconds = 0, 0.0
+    for w in range(max(int(walks), 1)):
+        backward = bool(w % 2)
+        n = max(axis.planned_count(backward), 1)
+        if w:
+            # the turning point was set and measured by the previous walk
+            # and is not taken again — 3 points there and back is 5, not 6
+            n -= 1
+        n = max(n, 0)
+        points += n
+        seconds += n * axis.point_delay(backward)
+    back_steps = max(max(axis.planned_count(True), 1) - 1, 0)
+    flyback = 0.0 if axis.snake else back_steps * axis.point_delay(True)
+    return points, seconds, flyback
+
+
+def plan_program(axes, solved: Optional[int] = None):
+    """``(points, seconds)`` the engine is expected to take.
+
+    The single home for this arithmetic. The engine's progress total, the
+    lab profile's ``max_duration_s`` pre-flight and the sweep page's
+    estimate all call it, because three separate copies had drifted apart
+    and all three were wrong in the same three ways:
+
+    * ``walks`` counted on outer axes, which the engine ignores by design;
+    * one forward point count reused for a backward walk that has its own
+      step size;
+    * the turning point between consecutive walks counted twice.
+
+    What it models: per-direction step sizes and delays, the shared
+    turning point, walks on the innermost axis only, and the fly-back
+    between rows that a ``snake`` axis does not pay.
+
+    What it cannot: whether an instrument ramps itself, so the fly-back is
+    priced as a stepwise walk and a self-ramping axis returns sooner than
+    this says. Instrument settling and communication time are invisible
+    here too, so treat the result as a floor.
+    """
+    loop = [i for i in range(len(axes)) if i != solved]
+    if not loop:
+        return 1, 0.0
+    inner = loop[-1]
+    plans = {i: plan_axis(axes[i],
+                          axes[i].effective_walks() if i == inner else 1)
+             for i in loop}
+
+    total = 1
+    for i in loop:
+        total *= max(plans[i][0], 1)
+
+    seconds = 0.0
+    entries = 1                       # how often this level is entered
+    for pos, i in enumerate(loop):
+        points, measured, _ = plans[i]
+        seconds += entries * measured
+        steps = entries * max(points, 1)
+        below = [plans[j][2] for j in loop[pos + 1:]]
+        if below:
+            # the levels below are walked back together, so one return
+            # costs the slowest of them rather than their sum
+            seconds += steps * max(below)
+        entries = steps
+    return total, seconds
 
 
 @dataclass(frozen=True)
