@@ -79,6 +79,7 @@ class App:
         #: built on first use: the connector relays into the same session
         #: the local endpoint uses
         self._agent_session = None
+        self._attach_telegram_log()
         # the Telegram link is created once and reconfigured in place, so
         # a settings edit mid-sweep cannot lose its queued notifications
         self.tg_link = TelegramLink(
@@ -637,6 +638,35 @@ class App:
             rig_name=st.tg_rig_name or self._default_rig_name(),
             allow_control=st.tg_allow_control,
             push_s=st.tg_push_s, snapshot_s=st.tg_snapshot_s)
+
+    def _attach_telegram_log(self) -> None:
+        """Keep a small record of when the notification service stopped
+        answering and when it came back, in ``config/telegram.log``.
+
+        Only those transitions are written, so it stays a few lines a day
+        and needs no clean-up beyond the size cap. It exists because "it
+        stopped updating at some point yesterday" had nothing to look at
+        afterwards: the reason only ever lived on the Settings page.
+        """
+        import logging
+        from logging.handlers import RotatingFileHandler
+        logger = logging.getLogger("unisweep.telegram")
+        if any(getattr(h, "_unisweep", False) for h in logger.handlers):
+            return
+        try:
+            folder = os.path.join(self.core_dir, "config")
+            os.makedirs(folder, exist_ok=True)
+            handler = RotatingFileHandler(
+                os.path.join(folder, "telegram.log"),
+                maxBytes=256 * 1024, backupCount=1, encoding="utf-8")
+        except Exception:                              # noqa: BLE001
+            return                       # a read-only folder costs the log
+        handler._unisweep = True
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s  %(message)s", "%Y-%m-%d %H:%M:%S"))
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
 
     def _map_cmap(self) -> str:
         """The colour scale the map windows use, for pictures sent out.

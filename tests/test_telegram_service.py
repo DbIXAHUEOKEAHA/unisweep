@@ -422,6 +422,90 @@ def test_display_name_survives_a_user_with_no_username():
     assert handlers._display_name(_Update(None)) == ""
 
 
+# ------------------------------------------------------- events taken ---
+def _drive_push(events, *, links="one", fail_insert_at=None):
+    """Run the real push handler against a fake database; return
+    (reply, rows written)."""
+    import asyncio
+    from unisweep_bot import db, ingest
+
+    rig = {"rig_id": "R", "name": "ATTODRY"}
+    link = {"chat_id": 42, "prefs": {}, "title": "", "created_at": None}
+    roster = {"one": [link], "none": [], "unreadable": None}[links]
+    written = []
+
+    def outbox_add(*args):
+        if fail_insert_at is not None and len(written) == fail_insert_at:
+            return False
+        written.append(args)
+        return True
+
+    fakes = {"snapshot_put": lambda *a: True, "rig_seen": lambda *a: True,
+             "rig_tools_set": lambda *a: True,
+             "links_for_rig": lambda rig_id: roster,
+             "commands_take": lambda rig_id: [],
+             "snapshot_age_marker": lambda rig_id: None,
+             "outbox_add": outbox_add,
+             "link_touch_progress": lambda *a: True}
+    saved = {k: getattr(db, k) for k in fakes}
+    saved_auth, saved_body = ingest._authenticate, ingest._body
+
+    async def auth(request):
+        return rig, None
+
+    async def body(request):
+        return {"state": {"state": "stopped"}, "events": events}
+
+    try:
+        for k, v in fakes.items():
+            setattr(db, k, v)
+        ingest._authenticate, ingest._body = auth, body
+        response = asyncio.run(ingest.push(None))
+    finally:
+        for k, v in saved.items():
+            setattr(db, k, v)
+        ingest._authenticate, ingest._body = saved_auth, saved_body
+    return json.loads(response.body), written
+
+
+def _events(n):
+    return [{"seq": 1000 + i, "kind": "finished", "text": f"⛔ stop {i}"}
+            for i in range(n)]
+
+
+def test_the_service_says_how_many_events_it_took():
+    """The rig deletes exactly what the service took. Before, it deleted
+    everything it sent, so whatever the service did not take was gone."""
+    from unisweep_bot import config
+    reply, written = _drive_push(_events(70))
+    assert reply["events_taken"] == config.MAX_EVENTS_PER_PUSH == 50
+    assert len(written) == 50
+
+    # a roster it could not read built nothing, so it owes everything
+    reply, written = _drive_push(_events(3), links="unreadable")
+    assert reply["events_taken"] == 0 and not written
+    assert reply["roster_known"] is False
+
+    # an insert that failed stops the count there; the rig re-sends from
+    # that event, and de-duplication keeps the earlier ones from doubling
+    reply, written = _drive_push(_events(5), fail_insert_at=2)
+    assert reply["events_taken"] == 2, reply["events_taken"]
+
+    # nobody paired: nothing is owed to anybody, so all of it is taken
+    reply, written = _drive_push(_events(4), links="none")
+    assert reply["events_taken"] == 4 and not written
+
+
+def test_the_rig_and_the_service_agree_on_the_cap():
+    """If these drift apart, the rig sends more than the service takes."""
+    from unisweep_bot import config
+    sys.path.insert(0, os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))
+    from unisweep.core.telegram_link import MAX_EVENTS_PER_PUSH
+    assert MAX_EVENTS_PER_PUSH == config.MAX_EVENTS_PER_PUSH
+
+
+
 if __name__ == "__main__":
     if not HAVE_SERVER:
         sys.exit(0)

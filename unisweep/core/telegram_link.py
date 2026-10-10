@@ -38,7 +38,9 @@ from __future__ import annotations
 
 import gzip
 import json
+import logging
 import math
+import queue
 import secrets
 import threading
 import time
@@ -47,6 +49,12 @@ import urllib.request
 import uuid
 from collections import deque
 from typing import Callable, Optional
+
+#: Only transitions are logged — the service stopped answering, and when
+#: it came back with how much was waiting — so "it stopped updating at
+#: some point yesterday" becomes a line with a time and a reason. The
+#: application attaches a file handler; on its own this is silent.
+log = logging.getLogger("unisweep.telegram")
 
 __all__ = ["TelegramLink", "DEFAULT_SERVICE_URL", "new_rig_identity"]
 
@@ -94,6 +102,13 @@ MAX_MAP_COLS = 160
 MAX_MAP_READS = 6
 #: never queue notifications without bound if the service is unreachable
 MAX_PENDING_EVENTS = 200
+#: The most events one push carries — the service's own
+#: ``MAX_EVENTS_PER_PUSH``.  The service fans out only that many, and the
+#: rig used to delete *everything* it had sent; after any stretch without
+#: a working push, the newest events — "sweep stopped" among them — were
+#: dropped by both sides with a 200 OK.  The rest wait for the next push,
+#: which goes at once.
+MAX_EVENTS_PER_PUSH = 50
 MAX_BACKOFF_S = 300.0
 IDLE_PUSH_S = 60.0
 
@@ -223,7 +238,18 @@ class TelegramLink:
         self.bot_username = ""
 
         self._events: deque = deque()
-        self._seq = 0
+        # Numbered from the clock, in microseconds, not from zero. The
+        # service de-duplicates on ``rig:seq:chat`` and keeps delivered
+        # rows for 72 hours, so a launch that counted from 1 again reused
+        # numbers yesterday's messages still held: its first "sweep
+        # stopped" could be discarded as a duplicate while a later one,
+        # numbered past yesterday's, got through. A clock base puts every
+        # launch above the last one; within a launch the numbers still
+        # count up by one, so a retried push still carries the same keys.
+        self._seq = time.time_ns() // 1000
+        self._tool_jobs: "queue.Queue" = queue.Queue()
+        self._tool_thread: Optional[threading.Thread] = None
+        self._failing_since: Optional[float] = None
         self._dropped = 0
         self._state = "idle"
         self._program: dict = {}
@@ -468,13 +494,28 @@ class TelegramLink:
         self._wake.set()
 
     def _queue(self, kind: str, text: str) -> None:
+        if kind == "file":
+            # A 2-D sweep opens a file per row, and this message is off
+            # unless somebody asked for it. One per file, unsent, they
+            # were the backlog that pushed a sweep's end out of reach;
+            # and after an outage nobody wants forty stale "new file"
+            # lines. The newest one says everything the others did.
+            self._events = deque(e for e in self._events
+                                 if e["kind"] != "file")
         self._seq += 1
         self._events.append({"seq": self._seq, "kind": kind,
                              "text": text, "ts": time.time()})
         if kind in URGENT_KINDS:
             self._urgent = True
         while len(self._events) > MAX_PENDING_EVENTS:
-            self._events.popleft()
+            # make room from the oldest ordinary event; the end of a
+            # sweep, an error or a safety stop is never what gives way
+            for i, e in enumerate(self._events):
+                if e["kind"] not in URGENT_KINDS:
+                    del self._events[i]
+                    break
+            else:
+                self._events.popleft()
             self._dropped += 1
 
     def report_result(self, command_id: int, ok: bool, detail: str,
@@ -536,6 +577,14 @@ class TelegramLink:
                     self.last_error = f"{type(exc).__name__}: {exc}"
                     if failures >= 3 and self.link_status == "active":
                         self.link_status = "error"
+                    first = self._failing_since is None
+                    if first:
+                        self._failing_since = time.time()
+                    queued, sweep = len(self._events), self._state
+                if first:
+                    log.warning("notification service not answering (%s) "
+                                "with %d event(s) queued, sweep %s",
+                                self.last_error, queued, sweep)
                 self._status(f"cannot reach the notification service "
                              f"({self.last_error}) — retrying in "
                              f"{_fmt_duration(delay)}")
@@ -709,11 +758,15 @@ class TelegramLink:
 
     def _push(self, hold: bool = True) -> None:
         with self._lock:
-            events = list(self._events)
+            events = list(self._events)[:MAX_EVENTS_PER_PUSH]
             results = list(self._results)
+            # The data copy travels while the data is changing. Once a
+            # sweep has ended it goes once (the finish forces it) and then
+            # only when somebody asks for a picture — it used to ride on
+            # every idle heartbeat, once a minute, until the next sweep.
             due = (self._force_snapshot
-                   or time.time() >= self._snapshot_due
-                   or self._state in ("finished", "stopped"))
+                   or (self._state in ("running", "paused")
+                       and time.time() >= self._snapshot_due))
             state = self._state_payload()
         snapshot = self._build_snapshot() if due else None
         payload = {"state": state, "events": events}
@@ -733,15 +786,30 @@ class TelegramLink:
             payload["snapshot"] = snapshot
 
         reply = self._post(_API_PUSH, payload, self._auth())
-        sent = {e["seq"] for e in events}
+        # Only what the service says it took is gone. A service that does
+        # not say (the one deployed before this) takes the first
+        # MAX_EVENTS_PER_PUSH, which is exactly what was sent.
+        taken = reply.get("events_taken")
+        if not isinstance(taken, int) or isinstance(taken, bool) \
+                or not 0 <= taken <= len(events):
+            taken = len(events)
+        sent = {e["seq"] for e in events[:taken]}
         with self._lock:
             self._events = deque(e for e in self._events
                                  if e["seq"] not in sent)
             self.last_push_ok = time.time()
             self.link_status = "active"
             self.last_error = ""
-            if not self._events:
-                self._urgent = False
+            # A backlog the service could not take in one go goes again
+            # straight away, as does anything urgent that arrived while
+            # this push was in flight; an ordinary event can wait a beat.
+            backlog = bool(self._events) and (
+                len(events) >= MAX_EVENTS_PER_PUSH or taken < len(events))
+            self._urgent = backlog or any(
+                e["kind"] in URGENT_KINDS for e in self._events)
+            outage = self._failing_since
+            self._failing_since = None
+            waiting = len(self._events)
             # the roster travels on every heartbeat, so somebody unlinking
             # in Telegram shows up on the Settings page without asking
             if reply.get("roster_known"):
@@ -749,6 +817,11 @@ class TelegramLink:
             if snapshot:
                 self._force_snapshot = False
                 self._snapshot_due = time.time() + self.snapshot_s
+        if outage is not None:
+            log.warning("notification service reachable again after %s; "
+                        "%d event(s) delivered, %d still queued",
+                        _fmt_duration(time.time() - outage), len(sent),
+                        waiting)
         self._status(self.summary())
 
         for result in results:
@@ -774,7 +847,19 @@ class TelegramLink:
                 self.report_result(cid, True, "snapshot sent")
             return
         if kind == "mcp":
-            self._run_tool(cid, command.get("args") or {})
+            # Never on this thread. A tool call can read instruments or
+            # ramp one, and while it ran here no heartbeat went out — the
+            # sweep looked frozen from the phone for as long as the
+            # instrument took. One worker keeps calls in order and the
+            # results travel back on the next push as before.
+            self._tool_jobs.put((cid, command.get("args") or {}))
+            with self._lock:
+                if self._tool_thread is None \
+                        or not self._tool_thread.is_alive():
+                    self._tool_thread = threading.Thread(
+                        target=self._tool_worker, daemon=True,
+                        name="unisweep-telegram-tools")
+                    self._tool_thread.start()
             return
         if kind in ("pause", "resume", "stop", "to_zero"):
             if not self.allow_control:
@@ -797,6 +882,20 @@ class TelegramLink:
         "set_parameter", "stop_sweep", "pause_sweep", "resume_sweep",
         "ramp_to_zero", "press_control", "set_controls",
     })
+
+    def _tool_worker(self) -> None:
+        """Runs relayed tool calls one at a time, off the heartbeat."""
+        while not self._stop.is_set():
+            try:
+                cid, args = self._tool_jobs.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            try:
+                self._run_tool(cid, args)
+            except Exception as exc:                   # noqa: BLE001
+                if cid is not None:
+                    self.report_result(cid, False, "tool call failed",
+                                       error=f"{type(exc).__name__}: {exc}")
 
     def _run_tool(self, cid, args: dict) -> None:
         """One tool call relayed from the Claude connector."""

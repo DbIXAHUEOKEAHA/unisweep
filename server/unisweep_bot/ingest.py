@@ -284,15 +284,27 @@ async def push(request: web.Request) -> web.Response:
     links = await asyncio.to_thread(db.links_for_rig, rig_id)
     roster_known = links is not None
     if links is None:
-        # Deliberately not an error for the rig: its data is stored and the
-        # notifications will be built on a later push.  A database blip
-        # must never make a rig believe it has been unlinked.
+        # Not an error for the rig — a database blip must never make it
+        # believe it has been unlinked — but nothing can be built either,
+        # so it is told it took no events and sends them again.
         links = []
 
+    # How many events this push really turned into messages, so the rig
+    # deletes those and keeps the rest. It used to delete everything it
+    # had sent, so whatever this side did not take — past the cap, after
+    # a roster that could not be read, or behind a failed insert — was
+    # lost by both sides with a 200 OK. "Sweep stopped" is the newest
+    # event in a backlog, so it was always the first to go.
     events = data.get("events") or []
-    if isinstance(events, list) and links:
-        await _fanout(rig, links, events[:config.MAX_EVENTS_PER_PUSH],
-                      snapshot)
+    if not isinstance(events, list):
+        events = []
+    events = events[:config.MAX_EVENTS_PER_PUSH]
+    if not roster_known:
+        taken = 0
+    elif links:
+        taken = await _fanout(rig, links, events, snapshot)
+    else:
+        taken = len(events)            # nobody is listening; nothing owed
     if links:
         await _progress_pings(rig, links, state)
 
@@ -330,22 +342,26 @@ async def push(request: web.Request) -> web.Response:
                    if link.get("created_at") else None}
                   for link in links],
         "roster_known": roster_known,
+        "events_taken": taken,
     })
 
 
 async def _fanout(rig: dict, links: list, events: list,
-                  snapshot: Any) -> None:
-    """Turn rig events into per-chat outbox rows.
+                  snapshot: Any) -> int:
+    """Turn rig events into per-chat outbox rows; return how many events
+    were fully stored.
 
     The rig numbers its events, and the de-duplication key is
     ``rig:seq:chat`` — so a push retried after a timeout produces the same
-    keys and inserts nothing the second time.
+    keys and inserts nothing the second time. That is also what makes
+    stopping at the first failed insert safe: the rig sends the rest
+    again, and the chats this event already reached are not written twice.
     """
     rig_id = rig["rig_id"]
     name = rig.get("name") or rig_id
     photo_cache: dict = {}
 
-    for raw in events:
+    for done, raw in enumerate(events):
         if not isinstance(raw, dict):
             continue
         kind = str(raw.get("kind") or "")
@@ -370,8 +386,10 @@ async def _fanout(rig: dict, links: list, events: list,
                                             photo_cache)
             key = (f"{rig_id}:{seq}:{chat_id}" if seq is not None
                    else f"{rig_id}:{kind}:{hash(text) & 0xffffffff}:{chat_id}")
-            await asyncio.to_thread(db.outbox_add, chat_id, kind, body, key,
-                                    rig_id, photo, None)
+            if not await asyncio.to_thread(db.outbox_add, chat_id, kind,
+                                           body, key, rig_id, photo, None):
+                return done
+    return len(events)
 
 
 async def _finish_photo(rig_id: str, name: str, snapshot: Any, read: str,

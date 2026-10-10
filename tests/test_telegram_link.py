@@ -203,7 +203,8 @@ def test_events_are_composed_and_kept_until_delivered():
     assert kinds == ["started", "error", "finished"], kinds
     # sequence numbers count *queued* events, so they stay dense and
     # the service's de-duplication key never has holes to reason about
-    assert [e["seq"] for e in link._events] == [1, 2, 3]
+    seqs = [e["seq"] for e in link._events]
+    assert seqs == [seqs[0], seqs[0] + 1, seqs[0] + 2], seqs
     assert "quench" in link._events[1]["text"]
     assert "57 points" in link._events[2]["text"]
 
@@ -595,6 +596,19 @@ def test_a_link_without_an_identity_says_exactly_what_is_missing():
 
 
 # ------------------------------------------------------- the connector ---
+def _relay(link, command, timeout=3.0):
+    """Hand a relayed tool call to the link and wait for its answer.
+
+    Tool calls run on their own worker, off the heartbeat, so the answer
+    arrives a moment later rather than before _handle_command returns.
+    """
+    import time as _t
+    link._handle_command(command)
+    end = _t.monotonic() + timeout
+    while not link._results and _t.monotonic() < end:
+        _t.sleep(0.005)
+
+
 def test_a_relayed_tool_call_runs_and_reports_its_answer():
     """Claude posts to the group's service, the call arrives here on the
     heartbeat, and the answer goes back on the next post. The rig never
@@ -606,7 +620,7 @@ def test_a_relayed_tool_call_runs_and_reports_its_answer():
         return {"result": {"lab": "2D materials", "sample": {"id": "GR-1"}}}
 
     link = _link(tool_cb=tool)
-    link._handle_command({"id": 42, "kind": "mcp",
+    _relay(link, {"id": 42, "kind": "mcp",
                           "args": {"tool": "describe_rig",
                                    "arguments": {"verbose": True}}})
     assert ran == [("describe_rig", {"verbose": True})]
@@ -622,7 +636,7 @@ def test_moving_an_instrument_is_refused_unless_the_switch_is_on():
     ran = []
     link = _link(allow_control=False,
                  tool_cb=lambda n, a: ran.append(n) or {"result": {}})
-    link._handle_command({"id": 7, "kind": "mcp",
+    _relay(link, {"id": 7, "kind": "mcp",
                           "args": {"tool": "set_parameter",
                                    "arguments": {"address": "GATE",
                                                  "value": 5.0}}})
@@ -637,7 +651,7 @@ def test_with_the_switch_on_the_same_call_goes_through():
     ran = []
     link = _link(allow_control=True,
                  tool_cb=lambda n, a: ran.append(n) or {"result": {"ok": 1}})
-    link._handle_command({"id": 8, "kind": "mcp",
+    _relay(link, {"id": 8, "kind": "mcp",
                           "args": {"tool": "set_parameter",
                                    "arguments": {"value": 1.0}}})
     assert ran == ["set_parameter"]
@@ -653,6 +667,11 @@ def test_reading_is_never_gated():
     for name in ("describe_rig", "status", "journal_runs", "read_channels"):
         link._handle_command({"id": 1, "kind": "mcp",
                               "args": {"tool": name, "arguments": {}}})
+    import time as _t
+    end = _t.monotonic() + 3.0
+    while len(link._results) < 4 and _t.monotonic() < end:
+        _t.sleep(0.005)
+    # one worker, so they also run in the order they were asked
     assert ran == ["describe_rig", "status", "journal_runs", "read_channels"]
 
 
@@ -661,7 +680,7 @@ def test_a_tool_that_explodes_costs_the_call_not_the_link():
         raise IOError("the instrument is on fire")
 
     link = _link(tool_cb=tool)
-    link._handle_command({"id": 9, "kind": "mcp",
+    _relay(link, {"id": 9, "kind": "mcp",
                           "args": {"tool": "read_channels",
                                    "arguments": {}}})
     posted = link._results[0]
@@ -671,7 +690,7 @@ def test_a_tool_that_explodes_costs_the_call_not_the_link():
 
 def test_a_setup_not_serving_the_tools_says_so():
     link = _link()                        # no tool_cb
-    link._handle_command({"id": 10, "kind": "mcp",
+    _relay(link, {"id": 10, "kind": "mcp",
                           "args": {"tool": "status", "arguments": {}}})
     assert link._results[0]["ok"] is False
     assert "not serving" in link._results[0]["error"]
@@ -747,6 +766,221 @@ def test_stop_raises_the_flag_before_it_says_goodbye():
     _patched(watch, lambda: link.stop(join=0.0))
     assert seen and all(seen), \
         "stop() must set the flag before the final push, not after"
+
+
+# ------------------------------------------------- losing a sweep's end ---
+# The report: a long sweep stopped updating; stopping it, then starting
+# and stopping a second one, produced "second sweep stopped" and nothing
+# at all about the first. Both ways that can happen are below — each one
+# drops the notification on BOTH sides with a 200 OK, so nothing retries.
+
+class _Outbox:
+    """The service's side of de-duplication, as the database does it:
+    one row per ``rig:seq:chat``, ``ON CONFLICT DO NOTHING``, kept for
+    72 hours whether or not it was delivered."""
+
+    def __init__(self, cap=50, ack=False):
+        self.keys = set()
+        self.delivered = []
+        self.cap = cap
+        self.ack = ack
+
+    def __call__(self, request, timeout=None):
+        body = request.data
+        if body[:2] == b"\x1f\x8b":
+            body = gzip.decompress(body)
+        events = json.loads(body.decode("utf-8")).get("events") or []
+        taken = events[:self.cap]           # MAX_EVENTS_PER_PUSH
+        for e in taken:
+            key = f"RIG:{e['seq']}:42"
+            if key not in self.keys:
+                self.keys.add(key)
+                if e["kind"] in ("finished", "error"):
+                    self.delivered.append(e["text"])
+        reply = {"ok": True}
+        if self.ack:
+            reply["events_taken"] = len(taken)
+        return _Resp(json.dumps(reply).encode())
+
+
+def test_a_restart_does_not_reuse_numbers_the_service_still_remembers():
+    """Every launch numbered its events from 1, and delivered rows stay in
+    the outbox for 72 hours under ``rig:seq:chat``. So after restarting
+    Unisweep, the first sweep's "stopped" could carry a number a message
+    from yesterday already used — and be discarded as its duplicate,
+    while a later sweep, numbered past yesterday's, got through."""
+    import time as _time
+    outbox = _Outbox()
+
+    yesterday = _link()
+    yesterday.on_event(ev.SweepStarted(columns=("t", "X_sweep", "R"),
+                                       dimensions=1, planned_points=5))
+    yesterday.on_event(ev.SweepFinished(stopped=True, points=5))
+    _patched(outbox, yesterday._push)
+    assert len(outbox.delivered) == 1
+
+    _time.sleep(0.01)                   # Unisweep is closed and reopened
+    today = _link()
+    today.on_event(ev.SweepStarted(columns=("t", "X_sweep", "R"),
+                                   dimensions=1, planned_points=5))
+    today.on_event(ev.SweepFinished(stopped=True, points=3))
+    _patched(outbox, today._push)
+    assert len(outbox.delivered) == 2, (
+        "today's 'sweep stopped' was swallowed as a duplicate of "
+        "yesterday's: " + repr(outbox.delivered))
+
+    # and within one launch the numbers still count up by one, so a retry
+    # after a timeout carries the same key and is still harmless
+    seqs = []
+    for i in range(3):
+        today.on_event(ev.SweepError(where="x", message=str(i), fatal=False,
+                                     crucial=True))
+        seqs.append(today._events[-1]["seq"])
+    assert seqs == [seqs[0], seqs[0] + 1, seqs[0] + 2], seqs
+
+
+def test_a_backlog_longer_than_the_service_takes_loses_nothing():
+    """The service fans out the first 50 events of a push; the rig then
+    deleted everything it had sent. After any stretch without a working
+    push, the newest events — the sweep's end among them — vanished."""
+    for ack in (False, True):           # the deployed service, and the next
+        outbox = _Outbox(cap=50, ack=ack)
+        link = _link()
+        for i in range(70):
+            link.on_event(ev.SweepError(where="lock-in", message=f"w{i}",
+                                        fatal=False, crucial=True))
+        link.on_event(ev.SweepFinished(stopped=True, points=1234))
+        for _ in range(5):
+            if not link._events:
+                break
+            _patched(outbox, link._push)
+        assert not link._events, f"left behind: {len(link._events)}"
+        assert any("1 234 points" in t for t in outbox.delivered), (
+            f"ack={ack}: the sweep's end never reached the outbox")
+        assert len(outbox.delivered) == 71, len(outbox.delivered)
+
+
+def test_a_new_data_file_does_not_queue_behind_every_other_one():
+    """A 2-D sweep opens a file per row, and the "new file" message is off
+    unless asked for. Queued one per file, they were the backlog that
+    pushed the sweep's end past the service's limit."""
+    link = _link()
+    link.on_event(ev.SweepStarted(columns=("t", "Y_sweep", "X_sweep", "R"),
+                                  dimensions=2, planned_points=400))
+    for i in range(40):
+        link.on_event(ev.FileOpened(path=f"C:/d/row{i}.csv",
+                                    columns=("t", "Y_sweep", "X_sweep", "R")))
+    files = [e for e in link._events if e["kind"] == "file"]
+    assert len(files) == 1, len(files)
+    assert files[0]["text"].endswith("row39.csv"), files[0]["text"]
+
+
+def test_an_overflowing_queue_keeps_the_sweeps_end():
+    link = _link()
+    link.on_event(ev.SweepFinished(stopped=False, points=7))
+    for i in range(400):
+        link.on_event(ev.SweepPaused() if i % 2 else ev.SweepResumed())
+    assert any(e["kind"] == "finished" for e in link._events)
+
+
+def test_a_non_finite_eta_cannot_block_every_heartbeat():
+    """Payloads are encoded with allow_nan=False. Progress figures went in
+    raw, so a single infinite ETA would have failed every push until the
+    next sweep started — and kept everything queued behind it."""
+    link = _link()
+    link.on_event(ev.SweepStarted(columns=("t", "X_sweep", "R"),
+                                  dimensions=1, planned_points=5))
+    link.on_event(ev.Progress(done=1, total=5, eta_seconds=float("inf"),
+                              elapsed_seconds=float("nan")))
+    server = _Server()
+    _patched(server, link._push)          # must not raise
+    assert server.calls, "nothing was posted"
+
+
+def test_a_slow_tool_call_does_not_stop_the_heartbeat():
+    """Tool calls relayed from the Claude connector ran on the link's own
+    thread, so a slow instrument read stopped every heartbeat until it
+    returned — the sweep looked frozen from the phone."""
+    import threading as _th
+    import time as _time
+    release = _th.Event()
+
+    def slow_tool(name, arguments):
+        release.wait(5.0)
+        return {"result": "read"}
+
+    link = _link(tool_cb=slow_tool)
+    started = _time.monotonic()
+    link._handle_command({"id": 7, "kind": "mcp",
+                          "args": {"tool": "read_channels", "arguments": {}}})
+    assert _time.monotonic() - started < 0.5, "the link waited on the tool"
+    release.set()
+    for _ in range(50):
+        if link._results:
+            break
+        _time.sleep(0.02)
+    assert link._results and link._results[0]["ok"], list(link._results)
+
+
+def test_a_finished_sweep_is_not_re_sent_on_every_idle_heartbeat():
+    """After a sweep ended, every idle heartbeat carried the whole data
+    copy again — once a minute, until the next sweep."""
+    link, _d, _m = _sweep_2d(rows=2, points=5)
+    link.on_event(ev.SweepFinished(stopped=False, points=10))
+    server = _Server()
+    _patched(server, link._push)
+    assert "snapshot" in server.calls[-1]["body"]      # the final picture
+    link._snapshot_due = 0.0                            # long after
+    _patched(server, link._push)
+    assert "snapshot" not in server.calls[-1]["body"]
+    # unless somebody asks for one
+    link._handle_command({"kind": "snapshot"})
+    _patched(server, link._push)
+    assert "snapshot" in server.calls[-1]["body"]
+
+
+
+def test_the_reported_evening_end_to_end():
+    """Yesterday's session; a restart; a 2-D sweep that loses the service
+    part-way through, opening a file per row; Stop; Start; Stop. Both
+    sweeps' ends must arrive — the report was that only the second did."""
+    import time as _time
+    cols = ("t", "B_sweep", "V_sweep", "R")
+    outbox = _Outbox(cap=50)
+
+    yesterday = _link()
+    for _ in range(3):
+        yesterday.on_event(ev.SweepStarted(columns=cols, dimensions=2,
+                                           planned_points=100))
+        for i in range(30):
+            yesterday.on_event(ev.FileOpened(path=f"y{i}.csv", columns=cols))
+            _patched(outbox, yesterday._push)
+        yesterday.on_event(ev.SweepFinished(stopped=False, points=100))
+        _patched(outbox, yesterday._push)
+    before = len(outbox.delivered)
+
+    _time.sleep(0.01)
+    link = _link()
+    link.on_event(ev.SweepStarted(columns=cols, dimensions=2,
+                                  planned_points=4000))
+    _patched(outbox, link._push)
+    for i in range(120):                 # rows keep coming; pushes fail
+        link.on_event(ev.FileOpened(path=f"row{i}.csv", columns=cols))
+        link.on_event(ev.SweepError(where="lock-in", message=f"overload {i}",
+                                    fatal=False, crucial=True))
+    link.on_event(ev.SweepFinished(stopped=True, points=1200))
+    link.on_event(ev.SweepStarted(columns=cols, dimensions=2,
+                                  planned_points=4000))
+    for _ in range(6):                   # the service is back
+        _patched(outbox, link._push)
+    link.on_event(ev.SweepFinished(stopped=True, points=40))
+    _patched(outbox, link._push)
+
+    today = outbox.delivered[before:]
+    assert any("1 200 points" in t for t in today), "first sweep's end lost"
+    assert any("40 points" in t for t in today), "second sweep's end lost"
+    assert not link._events
+
 
 
 if __name__ == "__main__":
