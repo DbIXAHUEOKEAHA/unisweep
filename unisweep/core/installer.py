@@ -221,6 +221,34 @@ class DriverInstaller:
             return ""
 
     @staticmethod
+    def _read_zip_bytes(zip_path: str, member: str) -> bytes:
+        """The member's bytes, undecoded - for installing a file as it is."""
+        try:
+            with zipfile.ZipFile(zip_path) as z:
+                return z.read(member)
+        except (OSError, KeyError, zipfile.BadZipFile):
+            return b""
+
+    @staticmethod
+    def _as_python(data: bytes) -> bytes:
+        """Check that bytes are Python, and hand back THE SAME BYTES.
+
+        A driver is written byte for byte, which is the only way it lands
+        exactly as it sits in the repository. Decoding it to text and
+        writing that in text mode put the newlines through a second
+        translation: a file stored with CRLF - which most of the repository
+        is - came out as CR CR LF on Windows, so every line had a blank
+        line under it. The Linux test runs never saw it, because there text
+        mode translates nothing.
+
+        Decoding is strict. ``errors="replace"`` used to substitute U+FFFD
+        for anything it could not read, which installs a quietly corrupted
+        driver that merely happens to parse.
+        """
+        ast.parse(data.decode("utf-8-sig"))   # a BOM is tolerated, not added
+        return data
+
+    @staticmethod
     def _read(path: str) -> str:
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as fh:
@@ -410,12 +438,16 @@ class DriverInstaller:
                     self._log(f"✓ {name}.py copied from bundle")
                     return True
                 if kind == "zip":
-                    text = self._read_zip_member(*spec)
-                    if not text:
+                    raw = self._read_zip_bytes(*spec)
+                    if not raw:
                         continue
-                    ast.parse(text)
-                    with open(target, "w", encoding="utf-8") as fh:
-                        fh.write(text)
+                    # validated BEFORE the file is opened: opening it
+                    # truncates, so a refused driver would otherwise be
+                    # left behind as an empty .py that the catalog then
+                    # offers as a local driver
+                    raw = self._as_python(raw)
+                    with open(target, "wb") as fh:
+                        fh.write(raw)
                     self._log(f"✓ {name}.py extracted from the cached "
                               f"repository snapshot")
                     return True
@@ -424,10 +456,9 @@ class DriverInstaller:
                     spec, headers={"User-Agent": "unisweep"})
                 with urllib.request.urlopen(req, timeout=30) as resp:
                     data = resp.read()
-                text = data.decode("utf-8", errors="replace")
-                ast.parse(text)          # refuse to install non-Python
-                with open(target, "w", encoding="utf-8") as fh:
-                    fh.write(text)
+                data = self._as_python(data)     # refuse before writing
+                with open(target, "wb") as fh:
+                    fh.write(data)
                 self._log(f"✓ {name}.py downloaded")
                 return True
             except SyntaxError:

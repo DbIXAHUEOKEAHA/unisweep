@@ -101,10 +101,16 @@ def _e(name, instrument, requires=(), vendor_note=""):
 
 _VISA = ("pyvisa", "pyvisa-py")
 
+# Every name here must match a file in the repository's devices/ folder
+# EXACTLY, case included. This list ships inside the code, so it is the
+# one source a fresh install cannot refresh away: an entry for a driver
+# that was renamed or deleted on GitHub is offered for download forever.
+# That is how a deleted SR830 sat beside the real sr830 on every new
+# setup. tests/test_catalog_builtin.py enforces the match.
 BUILTIN_CATALOG: dict[str, DriverEntry] = {e.name: e for e in [
     _e("Time", "Virtual time device (built into the core)"),
     # --- source-measure / meters ---------------------------------------
-    _e("Keithley2400", "Keithley 2400 SourceMeter (SMU)", _VISA),
+    _e("keithley2400", "Keithley 2400 SourceMeter (SMU)", _VISA),
     _e("keithley_series_2600b", "Keithley 2600B-series SourceMeter",
        _VISA + ("pymeasure",)),
     _e("keithley2182", "Keithley 2182/2182A nanovoltmeter", _VISA),
@@ -112,7 +118,7 @@ BUILTIN_CATALOG: dict[str, DriverEntry] = {e.name: e for e in [
     _e("sim900", "SRS SIM900 mainframe", _VISA),
     _e("sim928", "SRS SIM928 isolated voltage source", _VISA),
     _e("sr580", "SRS current preamplifier", _VISA),
-    _e("SR830", "SRS SR830 lock-in amplifier", ("pymeasure",) + _VISA),
+    _e("sr830", "SRS SR830 lock-in amplifier", ("pymeasure",) + _VISA),
     _e("sr860", "SRS SR860 lock-in amplifier", ("pymeasure",) + _VISA),
     _e("AFG1000", "Tektronix AFG1000 function generator", _VISA),
     _e("QDAQ2", "QDAQ data acquisition unit", _VISA),
@@ -152,9 +158,6 @@ BUILTIN_CATALOG: dict[str, DriverEntry] = {e.name: e for e in [
        "Thorlabs Kinesis software (DLLs) from Thorlabs"),
     _e("KSC101", "Thorlabs KSC101 solenoid controller", ("pyserial",)),
     _e("RotStage", "Standa rotation stage (libximc)", ("libximc",)),
-    _e("XStage", "Standa X stage (libximc)", ("libximc", "pyserial")),
-    _e("YStage", "Standa Y stage (libximc)", ("libximc",)),
-    _e("ZStage", "Standa Z stage (libximc)", ("libximc",)),
     _e("_8MTF_75LS05", "Standa 8MTF-75LS05 motorized stage",
        ("libximc", "pyserial")),
     _e("_8MVT100_25_1", "Standa 8MVT100-25-1 vertical stage",
