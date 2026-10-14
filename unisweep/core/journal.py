@@ -367,6 +367,8 @@ class Journal:
                           if program.get("map_interpolated") else "")
                        + (", uniform grid"
                           if program.get("map_uniform") else "")
+                       + (", NaN holes interpolated"
+                          if program.get("map_fill_nans") else "")
                        + (", images" if program.get("map_images") else ""))
         elif dimensions > 1:
             out.append("no maps")

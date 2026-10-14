@@ -31,6 +31,7 @@ class AppSettings:
     map_style: str = "grid"            # 'grid' | 'xyz' | 'both'
     map_interpolated: bool = True
     map_uniform: bool = False
+    map_fill_nans: bool = False
     map_images: bool = True
     # ---- sweep behaviour ---------------------------------------------
     to_zero_default: bool = False

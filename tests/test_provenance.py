@@ -11,6 +11,7 @@ import queue
 import sys
 import tempfile
 import threading
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -24,7 +25,7 @@ from unisweep.core.engine import SweepEngine
 from unisweep.core.labprofile import LabProfile
 from unisweep.core.provenance import (RunProvenance, device_snapshot,
                                       git_revision, new_run_id, read_sidecar,
-                                      sidecar_path)
+                                      run_record_path, sidecar_path)
 from unisweep.core.writer import DataWriter
 from tests.mock_driver import MockDevice
 
@@ -74,13 +75,18 @@ def run_sweep(tmp, mocks, **program_kw):
 
 
 # ---------------------------------------------------------------------------
-def test_a_sidecar_lands_beside_every_data_file():
+def test_every_data_file_resolves_to_a_record_but_only_one_is_written():
+    """Each data file still answers 'what produced you', from ONE run record
+    rather than a JSON beside every file."""
     tmp = tempfile.mkdtemp()
     engine = run_sweep(tmp, {"M1": MockDevice("M1")})
     data = engine.provenance.files[0]
-    assert data.endswith(".csv")
-    assert os.path.exists(sidecar_path(data))
-    assert sidecar_path(data) == data[:-4] + ".json"
+    assert read_sidecar(data)["run_id"] == engine.provenance.run_id
+    assert not os.path.exists(sidecar_path(data)), "no per-file sidecar"
+    folder = os.path.dirname(data)
+    records = [f for f in os.listdir(folder) if f.endswith(".json")]
+    assert records == [os.path.basename(
+        run_record_path(folder, engine.provenance.run_id))]
 
 
 def test_the_sidecar_needs_nothing_typed_by_the_operator():
@@ -151,18 +157,24 @@ def test_a_sidecar_exists_before_the_sweep_ends():
     record = read_sidecar(path)                 # nothing closed yet
     assert record["run_id"] == provenance.run_id
     assert record["program"]["axes"]
-    assert record["rows"] == 0 and record["file_closed_at"] == ""
+    # read from the file itself until the run is finished: one row was
+    # written, so one row it says — truer than the 0 the old per-file
+    # sidecar reported until it was closed
+    assert record["rows"] == 1 and record["file_closed_at"] == ""
+    assert record["columns"] == ["time", "a"]
 
 
-def test_an_empty_file_takes_its_sidecar_with_it():
+def test_an_empty_file_leaves_no_trace_in_the_record():
     tmp = tempfile.mkdtemp()
     provenance = RunProvenance(tmp, SweepProgram(), None, None).capture()
     writer = DataWriter(tmp, ("time", "a"), provenance=provenance)
     path = writer.open_file()
-    assert os.path.exists(sidecar_path(path))
+    assert not os.path.exists(sidecar_path(path))   # never one per file
     writer.close()                              # no rows -> file removed
     assert not os.path.exists(path)
-    assert not os.path.exists(sidecar_path(path))
+    provenance.finish()
+    assert path not in provenance.files
+    assert provenance.record()["files"] == []
 
 
 def test_a_writer_without_provenance_behaves_exactly_as_before():
@@ -243,3 +255,94 @@ def test_every_file_of_a_2d_sweep_gets_its_own_sidecar():
         record = read_sidecar(path)
         assert record["run_id"] == engine.provenance.run_id
         assert len(record["outer_axis_values"]) == 1  # the master's value
+
+
+# ---------------------------------------------------------------------------
+# once per sweep, not once per line
+# ---------------------------------------------------------------------------
+def _map(tmp, live_hook=None, rows=3):
+    program = SweepProgram(
+        axes=(AxisProgram(device="M1", parameter="Volt", start=0.0,
+                          stop=0.1 * (rows - 1), rate=0.1, delay=0.005,
+                          count_mode=CountMode.STEP),
+              AxisProgram(device="M2", parameter="Volt", start=0.0,
+                          stop=0.4, rate=0.1, delay=0.02,
+                          count_mode=CountMode.STEP)),
+        reads=("M2.Curr",), save_maps=False)
+    live = LiveProgram(program)
+    engine = SweepEngine(
+        live, Registry(tmp, {"M1": MockDevice("M1"), "M2": MockDevice("M2")}),
+        tmp, queue.Queue())
+    if live_hook is not None:
+        threading.Thread(target=live_hook, args=(live,), daemon=True).start()
+    engine.start()
+    engine.join(60)
+    assert not engine.is_alive()
+    return engine
+
+
+def test_a_map_writes_its_record_twice_however_many_lines_it_has():
+    """Start and finish. It used to be a full sidecar per line, twice: a
+    31 x 81 map meant five thousand writes of the same record."""
+    for rows in (3, 8):
+        tmp = tempfile.mkdtemp()
+        engine = _map(tmp, rows=rows)
+        assert len(engine.provenance.files) == rows
+        assert engine.provenance.writes == 2, (
+            f"{rows} lines -> {engine.provenance.writes} writes")
+        folder = os.path.dirname(engine.provenance.files[0])
+        assert len([f for f in os.listdir(folder)
+                    if f.endswith(".json")]) == 1
+
+
+def test_an_edit_while_running_updates_the_record_and_the_journal():
+    """Change a limit or a speed mid-sweep and the record describes the
+    sweep that actually ran, with what changed and when."""
+    from unisweep.core.journal import Journal
+
+    def edit(live):
+        time.sleep(0.15)
+        live.update_axis(1, stop=0.3, delay=0.01)
+
+    tmp = tempfile.mkdtemp()
+    engine = _map(tmp, live_hook=edit, rows=4)
+    record = read_sidecar(engine.provenance.files[-1])
+    fields = {(e["axis"], e["field"]): e for e in record["edits"]}
+    assert fields[(2, "stop")]["from"] == 0.4
+    assert fields[(2, "stop")]["to"] == 0.3
+    assert fields[(2, "delay")]["to"] == 0.01
+    assert all(e["at"] for e in record["edits"])
+    assert record["program"]["axes"][1]["stop"] == 0.3
+    assert engine.provenance.writes == 3          # start, the edit, finish
+
+    notes = Journal(tmp).notes(run_id=engine.provenance.run_id)
+    assert any("stop 0.4 \u2192 0.3" in n["text"] for n in notes)
+
+
+def test_an_untouched_sweep_records_no_edits():
+    tmp = tempfile.mkdtemp()
+    engine = _map(tmp)
+    record = read_sidecar(engine.provenance.files[0])
+    assert record["edits"] == []
+
+
+def test_older_per_file_sidecars_are_still_read():
+    """Data taken before run records existed keeps its provenance."""
+    import json
+    tmp = tempfile.mkdtemp()
+    data = os.path.join(tmp, "250908-1.csv")
+    open(data, "w").write("time,a\n0,1\n")
+    json.dump({"run_id": "old", "rows": 1, "program": {"axes": []}},
+              open(sidecar_path(data), "w"))
+    assert read_sidecar(data)["run_id"] == "old"
+
+
+def test_each_file_finds_its_own_run_when_runs_share_a_folder():
+    """Two sweeps on one day write into one folder with one base name; an
+    unfinished run's files are told apart by index."""
+    tmp = tempfile.mkdtemp()
+    first = _map(tmp, rows=2)
+    second = _map(tmp, rows=2)
+    for engine in (first, second):
+        for path in engine.provenance.files:
+            assert read_sidecar(path)["run_id"] == engine.provenance.run_id

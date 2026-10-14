@@ -450,10 +450,30 @@ class SweepEngine(threading.Thread):
         self._vector_maps[read] = writer
         return writer
 
+    def _track_edits(self) -> None:
+        """A limit or a speed changed while the sweep runs: say so in the
+        run record and in the journal. One integer comparison when nothing
+        changed, so it is cheap enough to sit in the measurement loop."""
+        if self.provenance is None:
+            return
+        try:
+            changes = self.provenance.track(self.live)
+        except Exception:                         # noqa: BLE001
+            return
+        if changes and self.journal is not None:
+            from .provenance import describe_changes
+            try:
+                self.journal.note(
+                    "Edited while running: " + describe_changes(changes),
+                    run_id=self.provenance.run_id, author="unisweep")
+            except Exception:                     # noqa: BLE001
+                pass
+
     def _record_point(self) -> None:
         row = self._measure_row()
         self._last_row = row
         self._writer.write(row)
+        self._track_edits()
         self._record_traces()
         if self._map is not None:
             self._map.add_point(self.axis_values[self._loop_axes[-1]],
@@ -1248,7 +1268,8 @@ class SweepEngine(threading.Thread):
                 data_path, interpolated=prog.map_interpolated,
                 images=prog.map_images, write_files=prog.save_maps,
                 style=prog.map_style, uniform=prog.map_uniform,
-                style_source=self.map_style_source)
+                style_source=self.map_style_source,
+                fill_nans=prog.map_fill_nans)
         except Exception as exc:              # noqa: BLE001
             self._error("maps", exc)
             self._map = None
@@ -1414,6 +1435,15 @@ class SweepEngine(threading.Thread):
             for a in self._adapters:
                 if a is not None:
                     a.clear()
+            if self.provenance is not None:
+                # the run record is completed ONCE, here — not rewritten
+                # for every line of a map
+                try:
+                    self._track_edits()
+                    self.provenance.finish(stopped=stopped,
+                                           points=self._points_done)
+                except Exception as exc:          # noqa: BLE001
+                    self._error("provenance", exc)
             if self.journal is not None and self.provenance is not None:
                 # after the writer closed, so the file list is complete
                 try:

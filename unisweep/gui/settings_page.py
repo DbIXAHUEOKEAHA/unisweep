@@ -119,11 +119,24 @@ class SettingsPage(ttk.Frame):
         Tooltip(cb, "Replace the planned grid (e.g. a non-uniform manual\n"
                     "step file) by a uniform linspace over the same range —\n"
                     "samples are mapped onto it by value.")
+        self.v_fill = tk.BooleanVar(value=st.map_fill_nans)
+        cb = ttk.Checkbutton(body, text="Interpolate NaN holes in maps",
+                             variable=self.v_fill, command=self._changed)
+        cb.grid(row=4, column=0, sticky="w", pady=2, columnspan=3,
+                padx=(16, 0))
+        Tooltip(cb, "Fill a missing map cell by linear interpolation\n"
+                    "between its neighbours along the line.\n"
+                    "Only holes with data on both sides are filled — the\n"
+                    "ends of a line are never extrapolated — and forward\n"
+                    "and backward walks are never blended. Points a region\n"
+                    "condition skipped stay empty.\n"
+                    "Maps only: the raw data and XYZ files are untouched,\n"
+                    "and the journal records that the map was filled.")
         self.v_images = tk.BooleanVar(value=st.map_images)
         cb = ttk.Checkbutton(body, text="Render PNG mirrors (and 3-D GIF "
                                         "stacks)",
                              variable=self.v_images, command=self._changed)
-        cb.grid(row=4, column=0, sticky="w", pady=2, columnspan=3,
+        cb.grid(row=5, column=0, sticky="w", pady=2, columnspan=3,
                 padx=(16, 0))
 
         # ---------------- notifications ---------------------------------
@@ -441,6 +454,11 @@ class SettingsPage(ttk.Frame):
             ctl.flag("settings.map_uniform", self.v_uniform, page=page,
                      label="Force a uniformly spaced map grid",
                      after_set=changed),
+            ctl.flag("settings.map_fill_nans", self.v_fill, page=page,
+                     label="Interpolate NaN holes in maps",
+                     help="Linear fill of interior holes along each line, "
+                          "per walk segment. Maps only; raw data untouched.",
+                     after_set=changed),
             ctl.flag("settings.map_images", self.v_images, page=page,
                      label="Keep PNG (and 3-D GIF) map mirrors",
                      after_set=changed),
@@ -735,6 +753,7 @@ class SettingsPage(ttk.Frame):
         st.map_style = self.v_style.get()
         st.map_interpolated = self.v_interp.get()
         st.map_uniform = self.v_uniform.get()
+        st.map_fill_nans = self.v_fill.get()
         st.map_images = self.v_images.get()
         st.plots_on_top = self.v_ontop.get()
         st.tg_rig_name = (self.e_rig_name.value() or "").strip()

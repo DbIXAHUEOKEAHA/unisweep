@@ -197,6 +197,7 @@ class SweepProgram:
     map_style: str = "grid"              # 'grid' worksheet | 'xyz' | 'both'
     map_interpolated: bool = True        # map samples onto the grid by value
     map_uniform: bool = False            # force a uniformly spaced grid
+    map_fill_nans: bool = False          # interpolate interior map holes
     map_images: bool = True              # keep PNG (and 3D GIF) mirrors
 
     @property

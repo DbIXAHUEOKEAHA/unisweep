@@ -153,6 +153,46 @@ def first_walk_columns(grid, matrix):
     return axis[first], np.asarray(matrix)[:, first]
 
 
+def fill_row_holes(grid, row, protect=None) -> np.ndarray:
+    """Interpolate across NaN holes in one map row, conservatively.
+
+    * Linear, between the finite neighbours on either side, at the cells'
+      own grid positions.
+    * Within each walk segment only — a forward and a backward pass are
+      never blended, so hysteresis between them survives.
+    * Interior holes only. A run of NaN at the start or end of a segment
+      has nothing on one side and is left NaN: that is extrapolation, and a
+      walk that stopped early should look like one.
+    * Never a ``protect`` cell — the points a region condition skipped on
+      purpose. Filling those would invent data inside an excluded area.
+
+    The raw data files and the XYZ file are untouched; this shapes only the
+    map worksheet and its image.
+    """
+    out = np.array(row, dtype=float)
+    g = np.asarray(grid, dtype=float)
+    if len(out) != len(g) or len(out) < 3:
+        return out
+    guard = (np.zeros(len(out), dtype=bool) if protect is None
+             else np.asarray(protect, dtype=bool))
+    for sl in _monotonic_segments(g):
+        seg, gx, keep = out[sl], g[sl], guard[sl]
+        finite = np.isfinite(seg)
+        if finite.sum() < 2:
+            continue
+        index = np.arange(len(seg))
+        first, last = index[finite][0], index[finite][-1]
+        holes = ~finite & (index > first) & (index < last) & ~keep
+        if not holes.any():
+            continue
+        order = np.argsort(gx[finite])
+        seg = seg.copy()
+        seg[holes] = np.interp(gx[holes], gx[finite][order],
+                               seg[finite][order])
+        out[sl] = seg
+    return out
+
+
 def _walk_grid(ax, uniform: bool = False) -> np.ndarray:
     """Forward grid concatenated over walks, alternating direction and
     dropping the duplicated turning point — exactly the legacy uniform grid
@@ -410,7 +450,7 @@ class MapWriter:
                  data_path: str, interpolated: bool = True,
                  images: bool = True, write_files: bool = True,
                  style: str = "grid", uniform: bool = False,
-                 style_source=None):
+                 style_source=None, fill_nans: bool = False):
         self.core_dir = core_dir
         self.live = live
         self.loop_axes = list(loop_axes)
@@ -421,6 +461,8 @@ class MapWriter:
         self.reads = list(reads)
         self.interpolated = interpolated
         self.uniform = uniform
+        #: interpolate interior NaN holes in each committed row (maps only)
+        self.fill_nans = bool(fill_nans)
         self.style = style if style in ("grid", "xyz", "both") else "grid"
         self.write_files = write_files
         self.grid_files = write_files and self.style in ("grid", "both")
@@ -460,6 +502,9 @@ class MapWriter:
         self._files_created = False
         self._inner_vals: list[float] = []
         self._read_vals: dict[str, list[float]] = {r: [] for r in self.reads}
+        #: which samples a region condition skipped, parallel to _inner_vals
+        #: — the holes the NaN fill must leave alone
+        self._skipped: list[bool] = []
         self._zmin: dict[str, float] = {}
         self._zmax: dict[str, float] = {}
         self._renderer = _Renderer() if images else None
@@ -526,6 +571,7 @@ class MapWriter:
     def add_point(self, inner_value: float, read_values: Sequence,
                   axis_values: Optional[Sequence] = None) -> None:
         self._inner_vals.append(float(inner_value))
+        self._skipped.append(False)
         vals = []
         for read, value in zip(self.reads, read_values):
             try:
@@ -581,6 +627,7 @@ class MapWriter:
 
     def add_skipped(self, inner_value: float) -> None:
         self._inner_vals.append(float(inner_value))
+        self._skipped.append(True)
         for read in self.reads:
             self._read_vals[read].append(np.nan)
 
@@ -662,7 +709,21 @@ class MapWriter:
             # complete-looking (and wrong) map line and hiding the fault.
             if len(g) > 1:
                 step_g = np.median(np.abs(np.diff(g)))
-                radius = max(step_g * 1.5, 1e-30)
+                # ...measured against the spacing the samples ACTUALLY
+                # achieved, not only the nominal grid step. A continuous
+                # walk takes a sample only as fast as its loop runs, and
+                # every sample reads the instrument plus every logged
+                # channel — so slow reads space real samples wider than
+                # rate x delay. A radius tied to the grid alone then
+                # blanked cells lying BETWEEN two genuine samples: a scan
+                # with no NaN in its raw data came out of the map with
+                # holes. Only samples that advanced count towards the
+                # spacing, so a frozen readback (every sample at one place)
+                # still falls back to the grid step and stays localised.
+                advance = np.diff(xs_s)
+                advance = advance[advance > 0]
+                spacing = float(np.median(advance)) if len(advance) else 0.0
+                radius = max(max(step_g, spacing) * 1.5, 1e-30)
                 vals[np.abs(g - xs_s[idx]) > radius] = np.nan
             out[g_sl] = vals
         return out
@@ -680,8 +741,17 @@ class MapWriter:
         self._master_value = master_value
         self._ensure_files()
         rows_out: dict[str, tuple] = {}
+        protect = None
+        if self.fill_nans and any(self._skipped):
+            # the condition's holes go through the same grid mapping as the
+            # data, so they land in exactly the cells they cover
+            marks = self._row_onto_grid([1.0 if s else 0.0
+                                         for s in self._skipped])
+            protect = marks == 1.0
         for read in self.reads:
             row = self._row_onto_grid(self._read_vals[read])
+            if self.fill_nans:
+                row = fill_row_holes(self._grid, row, protect)
             if read in self._ignored:
                 if read in self._rows_only:
                     rows_out[read] = tuple(float(v) for v in row)
@@ -718,6 +788,7 @@ class MapWriter:
                     ztransform=style.get("ztransform") or "",
                     first_walk_only=bool(style.get("first_walk_only")))
         self._inner_vals.clear()
+        self._skipped.clear()
         for read in self.reads:
             self._read_vals[read].clear()
         return (tuple(float(v) for v in self._grid), rows_out)

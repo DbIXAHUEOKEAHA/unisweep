@@ -559,6 +559,7 @@ class SweepPage(ttk.Frame):
             save_maps=self.app.settings.save_maps,
             map_style=self.app.settings.map_style,
             map_uniform=self.app.settings.map_uniform,
+            map_fill_nans=self.app.settings.map_fill_nans,
             map_images=self.app.settings.map_images,
             map_interpolated=self.app.settings.map_interpolated)
 
@@ -875,6 +876,7 @@ class SweepPage(ttk.Frame):
                 save_maps=self.app.settings.save_maps,
                 map_style=self.app.settings.map_style,
                 map_uniform=self.app.settings.map_uniform,
+                map_fill_nans=self.app.settings.map_fill_nans,
                 map_images=self.app.settings.map_images,
                 map_interpolated=self.app.settings.map_interpolated)
         os.makedirs(os.path.dirname(self._preset_file()), exist_ok=True)

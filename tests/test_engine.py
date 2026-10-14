@@ -2678,3 +2678,67 @@ def test_the_profile_decides_what_counts_as_a_temperature():
         "GATE", ParameterSpec(parameter="Volt", unit="V"))
     assert _bare_engine(volts)._stall_limits(
         "GATE", "Volt")[1] == SweepEngine.STALL_ABORT_S
+
+
+# ---------------------------------------------------------------------------
+# a continuous axis read slowly must not come out of the map with holes
+# ---------------------------------------------------------------------------
+class _SlowReadback(MockDevice):
+    """A self-ramping stage that takes time to answer a position query, as a
+    real one does over USB. Every continuous sample also reads each logged
+    channel, so in a real rig the loop is slower still."""
+
+    def __init__(self, *a, latency=0.15, **kw):
+        super().__init__(*a, **kw)
+        self.latency = latency
+
+    def Volt(self):
+        time.sleep(self.latency)
+        return super().Volt()
+
+
+def test_slow_readback_leaves_no_holes_in_the_map():
+    """Raw data with no NaN in it must not produce a map with NaN in it.
+
+    A continuous axis has its grid built from rate x delay, but the walk
+    samples only as fast as its loop runs. With slow reads, the real samples
+    land further apart than one grid step, and the locality check (sized to
+    the grid alone) blanked the cells lying between them. Reported from a
+    3-D map with a Standa stage as the fastest axis, at 3 units/s and 0.1 s.
+    """
+    stage = _SlowReadback("M1", sweepable_flags=[True, False], latency=0.15)
+    prog = SweepProgram(
+        axes=(AxisProgram(device="M2", parameter="Volt", start=0.0, stop=1.0,
+                          rate=0.5, delay=0.01, count_mode=CountMode.STEP),
+              AxisProgram(device="M1", parameter="Volt", start=0.0, stop=3.0,
+                          rate=3.0, delay=0.1, count_mode=CountMode.RATE,
+                          walks=2)),
+        reads=("M2.Noise",), save_maps=False)
+    evs, _, _ = run_engine(prog, {"M1": stage, "M2": MockDevice("M2")},
+                           timeout=60)
+
+    raw = [e for e in evs if isinstance(e, ev.PointMeasured)]
+    rows = [e for e in evs if isinstance(e, ev.MapRowCommitted)]
+    assert raw and rows
+
+    def numbers(seq):
+        out = []
+        for v in seq:
+            try:
+                out.append(float(v))
+            except (TypeError, ValueError):
+                pass
+        return out
+
+    assert not any(np.isnan(v) for e in raw for v in numbers(e.row)), \
+        "the raw data itself has NaN; this test needs a clean scan"
+    cells = len(next(iter(rows[0].read_rows.values())))
+    assert len(raw) / len(rows) < cells, (
+        "the slow readback must leave fewer samples than grid cells, or this "
+        "test is not exercising the case it is about")
+    for e in rows:
+        for read, row in e.read_rows.items():
+            holes = int(np.isnan(np.asarray(row, dtype=float)).sum())
+            assert holes == 0, (
+                f"{read}: {holes} of {len(row)} map cells are NaN although "
+                f"every raw sample was finite")

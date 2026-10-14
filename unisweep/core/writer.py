@@ -66,7 +66,7 @@ class DataWriter:
     def __init__(self, core_dir: str, columns: Sequence[str],
                  filename: str = "", provenance=None):
         self.core_dir = core_dir
-        #: optional RunProvenance; absent, no sidecars are written and the
+        #: optional RunProvenance; absent, no record is written and the
         #: writer behaves exactly as it did before
         self.provenance = provenance
         self.columns = tuple(columns)
@@ -103,6 +103,14 @@ class DataWriter:
         self._fh = None
         self._writer = None
         self._rows_in_file = 0
+        if self.provenance is not None:
+            # once per sweep, before the first point: everything heavy is
+            # written here and not again unless the program is edited
+            try:
+                self.provenance.begin(self.directory, self.base,
+                                      _next_index(self.directory, self.base))
+            except Exception:                     # noqa: BLE001
+                pass          # paperwork must never fail a measurement
 
     # -----------------------------------------------------------------
     def open_file(self, outer_values: Sequence[float] = ()) -> str:
